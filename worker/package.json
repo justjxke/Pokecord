@@ -1,0 +1,10 @@
+{
+  "name": "poke-discord-bridge-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "../node_modules/.bin/tsc -p tsconfig.json --noEmit",
+    "dev": "npx wrangler@latest dev",
+    "deploy": "npx wrangler@latest deploy"
+  }
+}
