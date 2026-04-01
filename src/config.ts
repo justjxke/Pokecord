@@ -6,7 +6,7 @@ import type { BridgeConfig } from "./types";
 
 const DEFAULT_MCP_PORT = 3000;
 const DEFAULT_POKE_API_BASE_URL = "https://poke.com/api/v1";
-const DEFAULT_MCP_HOST = "127.0.0.1";
+const DEFAULT_MCP_HOST = "0.0.0.0";
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 40;
 const DEFAULT_BRIDGE_MODE: BridgeMode = "private";
 const DOTENV_PATH = join(process.cwd(), ".env");

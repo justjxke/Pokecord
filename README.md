@@ -34,7 +34,7 @@ Set these in `.env`:
 - `POKE_BRIDGE_MODE` (`private` or `public`)
 - `POKE_EDGE_SECRET` if you use the Worker proxy path
 - `POKE_MCP_PORT` optional, defaults to `3000`
-- `POKE_MCP_HOST` optional, defaults to `127.0.0.1`
+- `POKE_MCP_HOST` optional, defaults to `0.0.0.0`
 - `POKE_CONTEXT_MESSAGES` optional, defaults to `40`
 
 ## Public Mode
