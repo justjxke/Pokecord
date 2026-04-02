@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import { loadConfig } from "./config";
 import { startDiscordBot, startTypingIndicator, sendDiscordMessage, sendDiscordReaction, editDiscordMessage, deleteDiscordMessage } from "./discordBot";
+import { getTenantPokeSecret } from "./bridgePolicy";
 import { startMcpServer } from "./mcp";
 import { loadState, saveState, type BridgeState } from "./state";
 import type { DiscordReplyTarget, DiscordRelayRequest, DiscordSentMessageRecord } from "./types";
@@ -124,7 +125,7 @@ function resolveSentMessageTarget(targets: Map<string, DiscordSentMessageRecord>
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const state = await loadState(config.statePath, config.bridgeMode);
+  const state = await loadState(config.statePath, config.stateSecret);
   const pendingTargets = new Map<string, DiscordReplyTarget>();
   const sentMessages = new Map<string, DiscordSentMessageRecord>();
   let discordClient: Awaited<ReturnType<typeof startDiscordBot>> | null = null;
@@ -145,7 +146,7 @@ async function main(): Promise<void> {
     proxySecret: config.edgeSecret,
     onSendDiscordMessage: async (content, meta) => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const channelId = resolveReplyTarget(pendingTargets, meta, state.private.dmChannelId);
+      const channelId = resolveReplyTarget(pendingTargets, meta);
       const messageIds = await sendDiscordMessage(discordClient, channelId, content, {
         replyToMessageId: meta?.replyToMessageId,
         attachments: meta?.attachments,
@@ -156,17 +157,17 @@ async function main(): Promise<void> {
     },
     onEditDiscordMessage: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.private.dmChannelId);
+      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta);
       await editDiscordMessage(discordClient, channelId, messageId, meta.content, meta.embeds);
     },
     onDeleteDiscordMessage: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta, state.private.dmChannelId);
+      const { channelId, messageId } = resolveSentMessageTarget(sentMessages, meta);
       await deleteDiscordMessage(discordClient, channelId, messageId);
     },
     onReactDiscordMessage: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
-      const channelId = resolveReplyTarget(pendingTargets, meta, state.private.dmChannelId);
+      const channelId = resolveReplyTarget(pendingTargets, meta);
       if (!meta.messageId) throw new Error("Discord message id is required.");
       await sendDiscordReaction(discordClient, channelId, meta.messageId, meta.emoji);
     }
@@ -175,10 +176,15 @@ async function main(): Promise<void> {
   log(`MCP server listening on http://${config.mcpHost}:${mcp.port}`);
   log(`Bridge mode: ${config.bridgeMode}`);
   logHostUrlHints();
-  tunnelProcess = await startTunnel(mcp.port, config.autoTunnel && config.edgeSecret == null);
+  tunnelProcess = await startTunnel(mcp.port, config.autoTunnel);
 
   discordClient = await startDiscordBot(config, state, async next => persistState(next), async request => {
     rememberPendingTarget(pendingTargets, request);
+    const pokeApiKey = getTenantPokeSecret(state, request.tenant, config.stateSecret);
+    if (!pokeApiKey) {
+      pendingTargets.delete(request.bridgeRequestId);
+      throw new Error(`No Poke API key linked for ${request.tenant.kind}.`);
+    }
 
     let stopTyping: (() => Promise<void>) | null = null;
     try {
@@ -188,7 +194,7 @@ async function main(): Promise<void> {
     }
 
     try {
-      return await sendToPoke(config, request);
+      return await sendToPoke(config, pokeApiKey, request);
     } catch (error) {
       pendingTargets.delete(request.bridgeRequestId);
       throw error;

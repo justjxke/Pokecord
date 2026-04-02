@@ -2,7 +2,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { createDefaultState, normalizeState } from "./bridgePolicy";
-import type { BridgeMode, BridgeState } from "./types";
+import type { BridgeState } from "./types";
 
 export type { BridgeState } from "./types";
 
@@ -13,19 +13,19 @@ export function getStatePath(): string {
 
 export { createDefaultState };
 
-export async function loadState(path = getStatePath(), fallbackMode: BridgeMode = "private"): Promise<BridgeState> {
+export async function loadState(path = getStatePath(), stateSecret = ""): Promise<BridgeState> {
   try {
     await access(path);
   } catch {
-    return createDefaultState(fallbackMode);
+    return createDefaultState();
   }
 
   const raw = await readFile(path, "utf8");
 
   try {
-    return normalizeState(JSON.parse(raw), fallbackMode);
+    return normalizeState(JSON.parse(raw), stateSecret);
   } catch {
-    return createDefaultState(fallbackMode);
+    return createDefaultState();
   }
 }
 
@@ -46,4 +46,3 @@ export function rememberMessageId(state: BridgeState, messageId: string): Bridge
 export function hasSeenMessageId(state: BridgeState, messageId: string): boolean {
   return state.recentMessageIds.includes(messageId);
 }
-

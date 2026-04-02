@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
-    "test": "node --import tsx --test",
+    "test": "node --import tsx --test $(find test worker/test -name '*.ts' -print)",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -1,5 +1,5 @@
 import { buildPromptGuardrails } from "./bridgePolicy";
-import type { BridgeMode, DiscordRelayRequest } from "./types";
+import type { DiscordRelayRequest } from "./types";
 
 const MAX_CONTEXT_LINES = 40;
 
@@ -26,18 +26,20 @@ function formatContextLine(index: number, entry: DiscordRelayRequest["contextMes
   return `${index + 1}. ${entry.authorName}: ${content}${attachmentSuffix}`;
 }
 
-export function buildDiscordRelayPrompt(request: DiscordRelayRequest, bridgeMode: BridgeMode): string {
+export function buildDiscordRelayPrompt(request: DiscordRelayRequest): string {
   const lines = [
     "You are responding to a Discord bridge request.",
-    ...buildPromptGuardrails(bridgeMode),
+    ...buildPromptGuardrails(),
     `Bridge request id: ${request.bridgeRequestId}`,
+    `Tenant kind: ${request.tenant.kind}`,
+    `Tenant id: ${request.tenant.id}`,
     `Mode: ${request.mode}`,
     `Reply target channel id: ${request.replyTarget.channelId}`,
     request.replyTarget.label ? `Reply target label: ${request.replyTarget.label}` : null,
     `Discord user id: ${request.discordUserId}`,
     `Discord channel id: ${request.discordChannelId}`,
     `Message id: ${request.discordMessageId}`,
-    request.mode === "guild" ? "Any server member may mention or reply to Poke in guild channels." : null,
+    request.mode === "guild" ? "Treat guild conversations as server-scoped and follow the server's configured channels." : null,
     "",
     "User message:",
     request.prompt.trim(),
@@ -53,4 +55,3 @@ export function buildDiscordRelayPrompt(request: DiscordRelayRequest, bridgeMode
 
   return lines.filter((line): line is string => line != null).join("\n");
 }
-

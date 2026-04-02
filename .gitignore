@@ -1,6 +1,7 @@
+.playwright-mcp/
 .env
 .env.private
-.env.bak.*
-node_modules
-dist
 .DS_Store
+**/.DS_Store
+node_modules/
+worker/node_modules/

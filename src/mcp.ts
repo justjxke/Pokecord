@@ -709,12 +709,14 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
 
     if (req.method === "GET" && path === "/health") {
       const installationCount = Object.keys(options.state.guildInstallations).length;
+      const linkedUsers = Object.values(options.state.users).filter(user => user.encryptedPokeApiKey != null).length;
       writeJson(res, 200, {
         ok: true,
         mode: options.state.mode,
-        linked: options.state.mode === "private" ? options.state.private.ownerUserId != null : installationCount > 0,
-        privateDmChannelId: options.state.private.dmChannelId,
-        installedGuilds: installationCount
+        ownerLinked: options.state.owner.encryptedPokeApiKey != null,
+        linkedUsers,
+        installedGuilds: installationCount,
+        linkedTenants: (options.state.owner.encryptedPokeApiKey ? 1 : 0) + linkedUsers + installationCount
       });
       return;
     }

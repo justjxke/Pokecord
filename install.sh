@@ -88,13 +88,16 @@ backup_file() {
 write_env() {
   cat > "$ROOT_DIR/.env" <<EOF
 DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN
-POKE_API_KEY=$POKE_API_KEY
 POKE_EDGE_SECRET=$EDGE_SECRET
-POKE_BRIDGE_MODE=private
+POKE_STATE_SECRET=$EDGE_SECRET
+POKE_BRIDGE_MODE=hybrid
 POKE_MCP_PORT=$BACKEND_PORT
 POKE_MCP_HOST=0.0.0.0
 POKE_AUTO_TUNNEL=false
 EOF
+  if [[ -n "${OWNER_DISCORD_USER_ID:-}" ]]; then
+    printf 'POKE_OWNER_DISCORD_USER_ID=%s\n' "$OWNER_DISCORD_USER_ID" >> "$ROOT_DIR/.env"
+  fi
   chmod 600 "$ROOT_DIR/.env"
 }
 
@@ -241,10 +244,10 @@ main() {
   confirm "Continue" || die "Cancelled."
 
   prompt_secret DISCORD_BOT_TOKEN "Discord bot token"
-  prompt_secret POKE_API_KEY "Poke API key"
   prompt BACKEND_HOSTNAME "mcp.example.com" "Backend hostname for the Cloudflare Tunnel"
   prompt TUNNEL_NAME "$DEFAULT_TUNNEL_NAME" "Cloudflare tunnel name"
   prompt WORKERS_SUBDOMAIN "$DEFAULT_WORKERS_SUBDOMAIN" "Cloudflare workers.dev subdomain"
+  read -r -p "Owner Discord user ID (optional): " OWNER_DISCORD_USER_ID
 
   EDGE_SECRET="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
 
