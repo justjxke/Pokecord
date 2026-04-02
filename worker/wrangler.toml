@@ -4,4 +4,4 @@ compatibility_date = "2026-03-31"
 
 # Set this to the HTTPS hostname that exposes your backend.
 [vars]
-POKE_BACKEND_ORIGIN = "https://gitr_rk6g2-d51.f.jrnm.app"
+POKE_BACKEND_ORIGIN = "https://your-vps.example.com"
