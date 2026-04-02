@@ -13,7 +13,7 @@ Discord bridge for Poke, hosted 24/7. No self-hosting required:
 ## Quick Start
 
 1. Install the bot with [this invite link](https://discord.com/oauth2/authorize?client_id=1488275565214433481).
-2. For your own private use, open a DM with the bot and send `!setup`.
+2. For your own private use, open a DM with the bot and run `/poke setup`.
 3. For a server, ask a server admin or owner to run `/poke setup`.
 4. Use `/poke status` or `!status` to confirm the link.
 5. Send messages normally after setup.
@@ -25,10 +25,9 @@ Discord bridge for Poke, hosted 24/7. No self-hosting required:
 For your personal owner namespace:
 
 1. Open a DM with the bot.
-2. Send `!setup`.
-3. Paste your Poke API key in the DM.
-4. The bot deletes the paste after capture.
-5. Use `!status` or `!reset` if you need to check or clear the link.
+2. Run `/poke setup`.
+3. Paste your Poke API key into the modal.
+4. Use `!status` or `!reset` if you need to check or clear the link.
 
 ### Public Server Setup
 
@@ -43,9 +42,9 @@ For a server:
 ## Commands
 
 - DM mode:
-  - `!setup`
   - `!status`
   - `!reset`
+  - `/poke setup`
 - Slash commands:
   - `/poke send`
   - `/poke setup`

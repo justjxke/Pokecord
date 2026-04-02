@@ -48,8 +48,8 @@ const SERVER_ATTACHMENT_OPTION_COUNT = 5;
 const COMMAND_NAME = "poke";
 const COMMAND_PREFIX = "!";
 const DM_KEY_REGEX = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const DM_SETUP_MODAL_PREFIX = "poke-dm-setup";
 const GUILD_SETUP_MODAL_PREFIX = "poke-guild-setup";
-const DM_CAPTURE_TTL_MS = 15 * 60 * 1000;
 
 function isDmMessage(message: Message): boolean {
   return message.guildId == null;
@@ -253,14 +253,10 @@ function getTenantForGuild(guildId: string): TenantReference {
   return { kind: "guild", id: guildId };
 }
 
-function getTenantCaptureKey(tenant: TenantReference): string {
-  return `${tenant.kind}:${tenant.id}`;
-}
-
-function buildGuildSetupModal(guildId: string, channelId: string, userId: string): ModalBuilder {
+function buildSetupModal(customId: string, title: string): ModalBuilder {
   const modal = new ModalBuilder()
-    .setCustomId(`${GUILD_SETUP_MODAL_PREFIX}:${guildId}:${channelId}:${userId}`)
-    .setTitle("Link Poke to this server");
+    .setCustomId(customId)
+    .setTitle(title);
 
   const apiKeyInput = new TextInputBuilder()
     .setCustomId("apiKey")
@@ -273,11 +269,26 @@ function buildGuildSetupModal(guildId: string, channelId: string, userId: string
   return modal;
 }
 
-function parseGuildSetupModal(customId: string): { guildId: string; channelId: string; userId: string; } | null {
+export function buildGuildSetupModal(guildId: string, channelId: string, userId: string): ModalBuilder {
+  return buildSetupModal(`${GUILD_SETUP_MODAL_PREFIX}:${guildId}:${channelId}:${userId}`, "Link Poke to this server");
+}
+
+export function buildDmSetupModal(userId: string): ModalBuilder {
+  return buildSetupModal(`${DM_SETUP_MODAL_PREFIX}:${userId}`, "Link Poke to this account");
+}
+
+export function parseGuildSetupModal(customId: string): { guildId: string; channelId: string; userId: string; } | null {
   if (!customId.startsWith(`${GUILD_SETUP_MODAL_PREFIX}:`)) return null;
   const [, guildId, channelId, userId] = customId.split(":", 4);
   if (!guildId || !channelId || !userId) return null;
   return { guildId, channelId, userId };
+}
+
+export function parseDmSetupModal(customId: string): { userId: string; } | null {
+  if (!customId.startsWith(`${DM_SETUP_MODAL_PREFIX}:`)) return null;
+  const [, userId] = customId.split(":", 2);
+  if (!userId) return null;
+  return { userId };
 }
 
 function canManageGuildInstallation(interaction: ChatInputCommandInteraction | ModalSubmitInteraction): boolean {
@@ -320,18 +331,6 @@ function getTenantSecretState(state: BridgeState, tenant: TenantReference) {
   if (tenant.kind === "owner") return state.owner;
   if (tenant.kind === "user") return state.users[tenant.id] ?? null;
   return state.guildInstallations[tenant.id] ?? null;
-}
-
-function isPendingDmCapture(pendingCaptures: Map<string, number>, tenant: TenantReference): boolean {
-  const key = getTenantCaptureKey(tenant);
-  const createdAt = pendingCaptures.get(key);
-  if (createdAt == null) return false;
-  if (Date.now() - createdAt > DM_CAPTURE_TTL_MS) {
-    pendingCaptures.delete(key);
-    return false;
-  }
-
-  return true;
 }
 
 function setTenantSecretState(state: BridgeState, tenant: TenantReference, encryptedPokeApiKey: ReturnType<typeof encryptTenantSecret>, discordUserId: string, dmChannelId: string): BridgeState {
@@ -394,15 +393,13 @@ async function respond(interaction: ChatInputCommandInteraction | ModalSubmitInt
   await interaction.reply({ content, ephemeral: interaction.inGuild() });
 }
 
-async function handleDmMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>, pendingDmCaptures: Map<string, number>): Promise<void> {
+async function handleDmMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>): Promise<void> {
   const tenant = getTenantForDm(config, message.author.id);
   const command = readCommand(message.content);
   const tenantSecret = getTenantSecretState(state, tenant);
-  const captureKey = getTenantCaptureKey(tenant);
 
   if (command === "setup") {
-    pendingDmCaptures.set(captureKey, Date.now());
-    await sendTextMessage(message.channel, "Paste your Poke API key in this DM and I will delete the key message after capture.");
+    await sendTextMessage(message.channel, "Use /poke setup in this DM to open the link modal.");
     return;
   }
 
@@ -412,7 +409,6 @@ async function handleDmMessage(message: Message, config: BridgeConfig, state: Br
   }
 
   if (command === "reset") {
-    pendingDmCaptures.delete(captureKey);
     const nextState = tenant.kind === "owner" ? clearOwnerLink(state) : clearUserLink(state, message.author.id);
     Object.assign(state, nextState);
     await updateState(state);
@@ -421,24 +417,7 @@ async function handleDmMessage(message: Message, config: BridgeConfig, state: Br
   }
 
   if (!tenantSecret?.encryptedPokeApiKey) {
-    if (!isPendingDmCapture(pendingDmCaptures, tenant) && !isLikelyPokeApiKey(message.content)) {
-      await sendTextMessage(message.channel, "Send your Poke API key in this DM to link this account. I will delete the message after capture.");
-      return;
-    }
-
-    const encrypted = encryptTenantSecret(message.content.trim(), config.stateSecret);
-    pendingDmCaptures.delete(captureKey);
-    const nextState = setTenantSecretState(state, tenant, encrypted, message.author.id, message.channel.id);
-    Object.assign(state, nextState);
-    await updateState(state);
-
-    try {
-      await message.delete();
-    } catch {
-      // Message deletion is best-effort.
-    }
-
-    await sendTextMessage(message.channel, `Linked ${tenant.kind === "owner" ? "owner" : "your account"} to Poke.`);
+    await sendTextMessage(message.channel, "Use /poke setup in this DM to link this account.");
     return;
   }
 
@@ -529,14 +508,13 @@ export async function startDiscordBot(
     intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessages],
     partials: [Partials.Channel]
   });
-  const pendingDmCaptures = new Map<string, number>();
 
   client.on("messageCreate", async message => {
     if (message.author.bot) return;
 
     try {
       if (message.guildId == null) {
-        await handleDmMessage(message, config, state, updateState, onRelayRequest, pendingDmCaptures);
+        await handleDmMessage(message, config, state, updateState, onRelayRequest);
         return;
       }
 
@@ -552,6 +530,38 @@ export async function startDiscordBot(
   client.on("interactionCreate", async interaction => {
     try {
       if (interaction.isModalSubmit()) {
+        const dmParsed = parseDmSetupModal(interaction.customId);
+        if (dmParsed) {
+          if (interaction.inGuild()) {
+            await interaction.reply({ content: "Use /poke setup in a DM.", ephemeral: true });
+            return;
+          }
+          if (interaction.user.id !== dmParsed.userId) {
+            await interaction.reply({ content: "This setup session no longer matches.", ephemeral: true });
+            return;
+          }
+
+          const apiKey = interaction.fields.getTextInputValue("apiKey").trim();
+          if (!isLikelyPokeApiKey(apiKey)) {
+            await interaction.reply({ content: "That does not look like a valid Poke API key.", ephemeral: true });
+            return;
+          }
+
+          const encrypted = encryptTenantSecret(apiKey, config.stateSecret);
+          const tenant = getTenantForDm(config, interaction.user.id);
+          const dmChannelId = interaction.channelId ?? interaction.channel?.id ?? null;
+          if (!dmChannelId) {
+            await interaction.reply({ content: "Could not determine the DM channel for setup.", ephemeral: true });
+            return;
+          }
+
+          const nextState = setTenantSecretState(state, tenant, encrypted, interaction.user.id, dmChannelId);
+          Object.assign(state, nextState);
+          await updateState(state);
+          await interaction.reply({ content: `Linked ${tenant.kind === "owner" ? "owner" : "your account"} to Poke.`, ephemeral: false });
+          return;
+        }
+
         const parsed = parseGuildSetupModal(interaction.customId);
         if (!parsed) return;
         if (!interaction.inGuild()) {
@@ -589,7 +599,7 @@ export async function startDiscordBot(
 
       if (subcommand === "setup") {
         if (!interaction.inGuild()) {
-          await interaction.reply({ content: "In DMs, paste your Poke API key directly into the chat and I will delete it after capture.", ephemeral: false });
+          await interaction.showModal(buildDmSetupModal(interaction.user.id));
           return;
         }
         if (!canManageGuildInstallation(interaction)) {
