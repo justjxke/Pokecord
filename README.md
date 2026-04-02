@@ -1,14 +1,18 @@
 # Poke Discord Bridge
 
-Discord bridge for Poke, hosted 24/7:
+## A thank you message
+
+Thank you to the team at [interaction](https://interaction.co) for [Poke](https://poke.com), an amazing personal superintelligence that sits in your pocket..or in your discord!
+
+Discord bridge for Poke, hosted 24/7. No self-hosting required:
 
 - owner-private DMs for your own linked account
-- public DMs for each user who links their own Poke key
+- DMs for each user who links their own Poke key
 - guild installs with admin setup and channel allowlists
 
 ## Quick Start
 
-1. Open the hosted PokeDiscord recipe or invite.
+1. Install the bot with [this invite link](https://discord.com/oauth2/authorize?client_id=1488275565214433481).
 2. For your own private use, open a DM with the bot and send `!setup`.
 3. For a server, ask a server admin or owner to run `/poke setup`.
 4. Use `/poke status` or `!status` to confirm the link.
