@@ -333,6 +333,11 @@ function getTenantSecretState(state: BridgeState, tenant: TenantReference) {
   return state.guildInstallations[tenant.id] ?? null;
 }
 
+export function buildSetupLinkedMessage(state: BridgeState, tenant: TenantReference, config: BridgeConfig): string {
+  const status = formatTenantStatus(state, tenant, config);
+  return `${status} Use /poke status if you want the full view, or /poke reset to relink.`;
+}
+
 function setTenantSecretState(state: BridgeState, tenant: TenantReference, encryptedPokeApiKey: ReturnType<typeof encryptTenantSecret>, discordUserId: string, dmChannelId: string): BridgeState {
   if (tenant.kind === "owner") {
     return setOwnerLink(state, discordUserId, dmChannelId, encryptedPokeApiKey);
@@ -598,6 +603,11 @@ export async function startDiscordBot(
       const tenantSecret = getTenantSecretState(state, tenant);
 
       if (subcommand === "setup") {
+        if (tenantSecret?.encryptedPokeApiKey) {
+          await respond(interaction, buildSetupLinkedMessage(state, tenant, config));
+          return;
+        }
+
         if (!interaction.inGuild()) {
           await interaction.showModal(buildDmSetupModal(interaction.user.id));
           return;
