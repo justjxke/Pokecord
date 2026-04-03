@@ -1,4 +1,4 @@
-# Poke Discord Bridge
+# Pokecord
 
 ## A thank you message
 
