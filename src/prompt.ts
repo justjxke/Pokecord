@@ -5,7 +5,8 @@ const MAX_CONTEXT_LINES = 40;
 const GUILD_PREFACE = [
   "You're chatting in a public server.",
   "Keep the tone natural and helpful, but avoid personal identity, account ownership, age, location, school, work, or private linkage details.",
-  "If a request heads that way, steer back to something useful and general."
+  "If a request heads that way, steer back to something useful and general.",
+  "If the user asks for music or voice playback, use the voice context, search for one concrete YouTube video URL yourself, and call the bridge voice tools instead of guessing."
 ].join(" ");
 
 const DM_PREFACE = [
@@ -36,6 +37,25 @@ function formatContextLine(index: number, entry: DiscordRelayRequest["contextMes
   return `${index + 1}. ${entry.authorName}: ${content}${attachmentSuffix}`;
 }
 
+function formatVoiceContext(request: DiscordRelayRequest): string[] {
+  if (!request.voiceContext) return [];
+
+  const requester = request.voiceContext.requester;
+  const bot = request.voiceContext.bot;
+
+  return [
+    "Voice context:",
+    `Requester: ${requester.profileSummary} (user id: ${requester.userId})`,
+    requester.voiceChannel.id
+      ? `Requester voice channel: ${requester.voiceChannel.name ? `#${requester.voiceChannel.name}` : requester.voiceChannel.id}`
+      : "Requester voice channel: none",
+    bot
+      ? `Bot voice channel: ${bot.voiceChannel.id ? (bot.voiceChannel.name ? `#${bot.voiceChannel.name}` : bot.voiceChannel.id) : "none"}`
+      : "Bot voice channel: none",
+    bot ? `Voice queue: ${bot.currentTrack ? `playing ${bot.currentTrack.title}` : "idle"}${bot.queue.length ? `, ${bot.queue.length} queued` : ""}` : "Voice queue: none"
+  ];
+}
+
 function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest): string {
   const lines: (string | null)[] = [preface, "You are responding to a Discord bridge request.", ...buildPromptGuardrails()];
 
@@ -54,6 +74,7 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       "",
       "User message:",
       request.prompt.trim(),
+      ...formatVoiceContext(request),
       ...formatAttachments("Attachments:", request.attachments)
     );
 
@@ -67,7 +88,8 @@ function buildPromptWithPreface(preface: string, request?: DiscordRelayRequest):
       "When you want to reply to a specific Discord message, call replyToDiscordMessage with the message id you want to reply to. You may include attachments and embeds.",
       "When you want to edit a message the bridge already sent, call editDiscordMessage with the message id and new content or embeds.",
       "When you want to delete a message the bridge already sent, call deleteDiscordMessage with the message id.",
-      "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id."
+      "When you want to add a reaction to a specific Discord message, call reactToDiscordMessage with the emoji and message id.",
+      "When you want to join or control voice playback, use queueVoiceTrack for a concrete YouTube video URL or controlVoicePlayback for join, pause, resume, skip, stop, leave, current, queue, remove, and clear."
     );
   } else {
     lines.push("", "Use the same direct style, but keep responses grounded and safe.");

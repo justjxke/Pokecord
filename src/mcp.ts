@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import type { BridgeState, DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
+import type { VoiceOperationResult } from "./voice";
+
+type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear";
+type QueueVoiceTrackRequest = { bridgeRequestId: string; url: string; position: "front" | "back"; };
+type ControlVoicePlaybackRequest = { bridgeRequestId: string; action: VoiceControlAction; index?: number; };
 
 interface StartMcpServerOptions {
   host: string;
@@ -12,6 +17,8 @@ interface StartMcpServerOptions {
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onReactDiscordMessage: (meta: { emoji: string; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onGetChannelHistory: (meta: { channelId: string; limit: number; }) => Promise<DiscordChannelHistoryMessage[]>;
+  onQueueVoiceTrack: (meta: QueueVoiceTrackRequest) => Promise<VoiceOperationResult>;
+  onControlVoicePlayback: (meta: ControlVoicePlaybackRequest) => Promise<VoiceOperationResult>;
 }
 
 interface JsonRpcRequest {
@@ -43,6 +50,10 @@ const REACT_TOOL_NAME = "reactToDiscordMessage";
 const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
 const HISTORY_TOOL_NAME = "getChannelHistory";
 const HISTORY_TOOL_DESCRIPTION = "Get recent messages from a Discord channel.";
+const QUEUE_VOICE_TOOL_NAME = "queueVoiceTrack";
+const QUEUE_VOICE_TOOL_DESCRIPTION = "Join the requester's voice channel if needed and queue a YouTube track for playback.";
+const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
+const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session.";
 const MAX_BODY_BYTES = 128_000;
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id";
 
@@ -343,6 +354,48 @@ async function handleGetChannelHistoryToolCall(args: Record<string, unknown>, on
     limit,
     messages: result
   };
+}
+
+function readVoiceAction(value: unknown): VoiceControlAction {
+  if (typeof value !== "string" || !value.trim().length) {
+    throw new Error("action is required");
+  }
+
+  const action = value.trim();
+  const allowed: VoiceControlAction[] = ["join", "pause", "resume", "skip", "stop", "leave", "current", "queue", "remove", "clear"];
+  if (!allowed.includes(action as VoiceControlAction)) {
+    throw new Error(`Unknown action: ${action}`);
+  }
+
+  return action as VoiceControlAction;
+}
+
+async function handleQueueVoiceTrackToolCall(args: Record<string, unknown>, onQueueVoiceTrack: StartMcpServerOptions["onQueueVoiceTrack"]): Promise<unknown> {
+  const bridgeRequestId = readString(args.bridgeRequestId);
+  if (!bridgeRequestId) {
+    throw new Error("bridgeRequestId is required");
+  }
+
+  const url = readString(args.url);
+  if (!url) {
+    throw new Error("url is required");
+  }
+
+  const position = args.position === "front" ? "front" : "back";
+  const result = await onQueueVoiceTrack({ bridgeRequestId, url, position });
+  return result;
+}
+
+async function handleControlVoicePlaybackToolCall(args: Record<string, unknown>, onControlVoicePlayback: StartMcpServerOptions["onControlVoicePlayback"]): Promise<unknown> {
+  const bridgeRequestId = readString(args.bridgeRequestId);
+  if (!bridgeRequestId) {
+    throw new Error("bridgeRequestId is required");
+  }
+
+  const action = readVoiceAction(args.action);
+  const index = args.index == null ? undefined : Number(args.index);
+  const result = await onControlVoicePlayback({ bridgeRequestId, action, ...(index == null || Number.isNaN(index) ? {} : { index }) });
+  return result;
 }
 
 async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOptions): Promise<JsonRpcResponse> {
@@ -697,6 +750,55 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
               },
               required: ["channelId"]
             }
+          },
+          {
+            name: QUEUE_VOICE_TOOL_NAME,
+            description: QUEUE_VOICE_TOOL_DESCRIPTION,
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                bridgeRequestId: {
+                  type: "string",
+                  description: "Bridge request id for the current Discord turn."
+                },
+                url: {
+                  type: "string",
+                  description: "Concrete YouTube video URL to queue."
+                },
+                position: {
+                  type: "string",
+                  enum: ["back", "front"],
+                  default: "back",
+                  description: "Queue position for the track."
+                }
+              },
+              required: ["bridgeRequestId", "url"]
+            }
+          },
+          {
+            name: CONTROL_VOICE_TOOL_NAME,
+            description: CONTROL_VOICE_TOOL_DESCRIPTION,
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                bridgeRequestId: {
+                  type: "string",
+                  description: "Bridge request id for the current Discord turn."
+                },
+                action: {
+                  type: "string",
+                  enum: ["join", "pause", "resume", "skip", "stop", "leave", "current", "queue", "remove", "clear"],
+                  description: "Voice action to perform."
+                },
+                index: {
+                  type: "number",
+                  description: "1-based queue index to remove."
+                }
+              },
+              required: ["bridgeRequestId", "action"]
+            }
           }
         ]
       }
@@ -707,7 +809,7 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
     const name = typeof request.params?.name === "string" ? request.params.name : "";
     const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
 
-    if (name !== SEND_TOOL_NAME && name !== REPLY_TOOL_NAME && name !== EDIT_TOOL_NAME && name !== DELETE_TOOL_NAME && name !== REACT_TOOL_NAME && name !== HISTORY_TOOL_NAME) {
+    if (name !== SEND_TOOL_NAME && name !== REPLY_TOOL_NAME && name !== EDIT_TOOL_NAME && name !== DELETE_TOOL_NAME && name !== REACT_TOOL_NAME && name !== HISTORY_TOOL_NAME && name !== QUEUE_VOICE_TOOL_NAME && name !== CONTROL_VOICE_TOOL_NAME) {
       return { jsonrpc: "2.0", id: request.id ?? null, error: { code: -32602, message: `Unknown tool: ${name}` } };
     }
 
@@ -722,7 +824,11 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
               ? await handleDeleteToolCall(args, options.onDeleteDiscordMessage)
               : name === REACT_TOOL_NAME
                 ? await handleReactToolCall(args, options.onReactDiscordMessage)
-                : await handleGetChannelHistoryToolCall(args, options.onGetChannelHistory);
+                : name === HISTORY_TOOL_NAME
+                  ? await handleGetChannelHistoryToolCall(args, options.onGetChannelHistory)
+                  : name === QUEUE_VOICE_TOOL_NAME
+                    ? await handleQueueVoiceTrackToolCall(args, options.onQueueVoiceTrack)
+                    : await handleControlVoicePlaybackToolCall(args, options.onControlVoicePlayback);
       return {
         jsonrpc: "2.0",
         id: request.id ?? null,

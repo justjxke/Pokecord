@@ -4,7 +4,9 @@ import { getTenantPokeSecret } from "./bridgePolicy";
 import { startMcpServer } from "./mcp";
 import { loadState, saveState, type BridgeState } from "./state";
 import type { DiscordReplyTarget, DiscordRelayRequest, DiscordSentMessageRecord } from "./types";
+import type { VoiceManager } from "./voice";
 import { sendToPoke } from "./pokeClient";
+import type { Client } from "discord.js";
 
 const PENDING_TARGET_TTL_MS = 30 * 60 * 1000;
 const PENDING_TARGET_CLEANUP_MS = 5 * 60 * 1000;
@@ -40,11 +42,30 @@ function rememberPendingTarget(targets: Map<string, DiscordReplyTarget>, request
   targets.set(request.bridgeRequestId, request.replyTarget);
 }
 
+function rememberPendingRequest(targets: Map<string, DiscordRelayRequest>, request: DiscordRelayRequest): void {
+  targets.set(request.bridgeRequestId, request);
+}
+
 function cleanupPendingTargets(targets: Map<string, DiscordReplyTarget>): void {
   const cutoff = Date.now() - PENDING_TARGET_TTL_MS;
   for (const [bridgeRequestId, target] of targets) {
     if (target.createdAt < cutoff) targets.delete(bridgeRequestId);
   }
+}
+
+function cleanupPendingRequests(targets: Map<string, DiscordRelayRequest>): void {
+  const cutoff = Date.now() - PENDING_TARGET_TTL_MS;
+  for (const [bridgeRequestId, request] of targets) {
+    if (request.replyTarget.createdAt < cutoff) targets.delete(bridgeRequestId);
+  }
+}
+
+function resolvePendingRequest(targets: Map<string, DiscordRelayRequest>, bridgeRequestId: string): DiscordRelayRequest {
+  const request = targets.get(bridgeRequestId);
+  if (!request) {
+    throw new Error("Discord request context not found.");
+  }
+  return request;
 }
 
 function rememberSentMessages(targets: Map<string, DiscordSentMessageRecord>, bridgeRequestId: string | undefined, channelId: string, messageIds: string[]): void {
@@ -111,8 +132,10 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const state = await loadState(config.statePath, config.stateSecret);
   const pendingTargets = new Map<string, DiscordReplyTarget>();
+  const pendingRequests = new Map<string, DiscordRelayRequest>();
   const sentMessages = new Map<string, DiscordSentMessageRecord>();
-  let discordClient: Awaited<ReturnType<typeof startDiscordBot>> | null = null;
+  let discordClient: Client | null = null;
+  let voiceManager: VoiceManager | null = null;
 
   let saveQueue = Promise.resolve();
   const persistState = async (next: BridgeState) => {
@@ -156,6 +179,62 @@ async function main(): Promise<void> {
     onGetChannelHistory: async meta => {
       if (discordClient == null) throw new Error("Discord client is not ready.");
       return getDiscordChannelHistory(discordClient, meta.channelId, meta.limit);
+    },
+    onQueueVoiceTrack: async meta => {
+      if (discordClient == null) throw new Error("Discord client is not ready.");
+      if (voiceManager == null) throw new Error("Voice manager is not ready.");
+      const request = resolvePendingRequest(pendingRequests, meta.bridgeRequestId);
+      if (request.mode !== "guild" || request.tenant.kind !== "guild") {
+        throw new Error("Voice playback is only available in guilds.");
+      }
+      const voiceContext = voiceManager.describeVoiceContext(request.tenant.id, {
+        userId: request.discordUserId,
+        username: request.voiceContext?.requester.username ?? request.discordUserId,
+        displayName: request.voiceContext?.requester.displayName ?? request.discordUserId
+      });
+      if (!voiceContext?.requester.voiceChannel.id) {
+        throw new Error("Join a voice channel first.");
+      }
+
+      return voiceManager.queueVoiceTrack({
+        bridgeRequestId: meta.bridgeRequestId,
+        guildId: request.tenant.id,
+        requesterId: request.discordUserId,
+        requesterUsername: voiceContext.requester.username,
+        requesterDisplayName: voiceContext.requester.displayName,
+        requesterVoiceChannelId: voiceContext.requester.voiceChannel.id,
+        requesterVoiceChannelName: voiceContext.requester.voiceChannel.name,
+        textChannelId: request.replyTarget.channelId,
+        url: meta.url,
+        position: meta.position
+      });
+    },
+    onControlVoicePlayback: async meta => {
+      if (discordClient == null) throw new Error("Discord client is not ready.");
+      if (voiceManager == null) throw new Error("Voice manager is not ready.");
+      const request = resolvePendingRequest(pendingRequests, meta.bridgeRequestId);
+      if (request.mode !== "guild" || request.tenant.kind !== "guild") {
+        throw new Error("Voice playback is only available in guilds.");
+      }
+
+      const voiceContext = voiceManager.describeVoiceContext(request.tenant.id, {
+        userId: request.discordUserId,
+        username: request.voiceContext?.requester.username ?? request.discordUserId,
+        displayName: request.voiceContext?.requester.displayName ?? request.discordUserId
+      });
+
+      return voiceManager.controlVoicePlayback({
+        bridgeRequestId: meta.bridgeRequestId,
+        guildId: request.tenant.id,
+        requesterId: request.discordUserId,
+        requesterUsername: voiceContext?.requester.username ?? request.discordUserId,
+        requesterDisplayName: voiceContext?.requester.displayName ?? request.discordUserId,
+        requesterVoiceChannelId: voiceContext?.requester.voiceChannel.id ?? null,
+        requesterVoiceChannelName: voiceContext?.requester.voiceChannel.name ?? null,
+        textChannelId: request.replyTarget.channelId,
+        action: meta.action,
+        ...(meta.index == null ? {} : { index: meta.index })
+      });
     }
   });
 
@@ -163,11 +242,13 @@ async function main(): Promise<void> {
   log(`Bridge mode: ${config.bridgeMode}`);
   logHostUrlHints();
 
-  discordClient = await startDiscordBot(config, state, async next => persistState(next), async request => {
+  const runtime = await startDiscordBot(config, state, async next => persistState(next), async request => {
     rememberPendingTarget(pendingTargets, request);
+    rememberPendingRequest(pendingRequests, request);
     const pokeApiKey = getTenantPokeSecret(state, request.tenant, config.stateSecret);
     if (!pokeApiKey) {
       pendingTargets.delete(request.bridgeRequestId);
+      pendingRequests.delete(request.bridgeRequestId);
       throw new Error(`No Poke API key linked for ${request.tenant.kind}.`);
     }
 
@@ -182,15 +263,19 @@ async function main(): Promise<void> {
       return await sendToPoke(config, pokeApiKey, request);
     } catch (error) {
       pendingTargets.delete(request.bridgeRequestId);
+      pendingRequests.delete(request.bridgeRequestId);
       throw error;
     } finally {
       await stopTyping?.();
     }
   });
+  discordClient = runtime.client;
+  voiceManager = runtime.voiceManager;
   log(`Discord connected as ${discordClient.user?.tag ?? "unknown"}`);
 
   const cleanupInterval = setInterval(() => {
     cleanupPendingTargets(pendingTargets);
+    cleanupPendingRequests(pendingRequests);
     cleanupSentMessages(sentMessages);
   }, PENDING_TARGET_CLEANUP_MS);
 

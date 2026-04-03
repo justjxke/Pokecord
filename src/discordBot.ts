@@ -30,6 +30,7 @@ import {
   setUserLink
 } from "./bridgePolicy";
 import { buildDiscordRelayPrompt } from "./prompt";
+import { createVoiceManager, type VoiceManager } from "./voice";
 import { encryptTenantSecret } from "./tenantSecrets";
 import { rememberMessageId, type BridgeState } from "./state";
 import type {
@@ -41,6 +42,7 @@ import type {
   DiscordOutboundEmbed,
   DiscordReplyTarget,
   DiscordRelayRequest,
+  DiscordVoiceContext,
   PokeSendResult,
   TenantReference
 } from "./types";
@@ -246,6 +248,30 @@ async function collectChannelContext(channel: Message["channel"] | ChatInputComm
   }
 }
 
+function buildVoiceContext(
+  voiceManager: VoiceManager,
+  guild: Message["guild"] | ChatInputCommandInteraction["guild"] | null | undefined,
+  requesterId: string,
+  requesterUsername: string,
+  requesterDisplayName: string
+): DiscordVoiceContext | null {
+  if (!guild) return null;
+
+  return voiceManager.describeVoiceContext(guild.id, {
+    userId: requesterId,
+    username: requesterUsername,
+    displayName: requesterDisplayName
+  });
+}
+
+function getInteractionDisplayName(interaction: ChatInputCommandInteraction): string {
+  if (interaction.inGuild() && interaction.member && "displayName" in interaction.member && typeof interaction.member.displayName === "string") {
+    return interaction.member.displayName;
+  }
+
+  return interaction.user.globalName ?? interaction.user.username;
+}
+
 export async function getDiscordChannelHistory(client: Client, channelId: string, limit = 50): Promise<DiscordChannelHistoryMessage[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new Error("limit must be between 1 and 100");
@@ -388,7 +414,14 @@ function setTenantSecretState(state: BridgeState, tenant: TenantReference, encry
   return installGuildChannel(nextState, tenant.id, discordUserId, dmChannelId, encryptedPokeApiKey);
 }
 
-async function buildDiscordRequestFromMessage(config: BridgeConfig, state: BridgeState, message: Message, tenant: TenantReference, promptContent = message.content): Promise<DiscordRelayRequest> {
+async function buildDiscordRequestFromMessage(
+  config: BridgeConfig,
+  state: BridgeState,
+  message: Message,
+  tenant: TenantReference,
+  voiceManager: VoiceManager,
+  promptContent = message.content
+): Promise<DiscordRelayRequest> {
   const attachments = getMessageAttachments(message);
   const contextMessages = message.guildId == null ? [] : await collectChannelContext(message.channel, config.contextMessageCount);
   const replyTarget = buildReplyTarget(message.channelId, isDmMessage(message) ? "Direct message" : getChannelLabel(message.channel), isDmMessage(message) ? "dm" : "guild");
@@ -403,11 +436,23 @@ async function buildDiscordRequestFromMessage(config: BridgeConfig, state: Bridg
     prompt: promptContent,
     replyTarget,
     attachments,
-    contextMessages
+    contextMessages,
+    voiceContext: buildVoiceContext(
+      voiceManager,
+      message.guild,
+      message.author.id,
+      message.author.username,
+      message.member?.displayName ?? message.author.globalName ?? message.author.username
+    )
   };
 }
 
-async function buildDiscordRequestFromInteraction(config: BridgeConfig, interaction: ChatInputCommandInteraction, tenant: TenantReference): Promise<DiscordRelayRequest> {
+async function buildDiscordRequestFromInteraction(
+  config: BridgeConfig,
+  interaction: ChatInputCommandInteraction,
+  tenant: TenantReference,
+  voiceManager: VoiceManager
+): Promise<DiscordRelayRequest> {
   const attachments = getCommandAttachments(interaction);
   const contextMessages = interaction.inGuild() ? await collectChannelContext(interaction.channel, config.contextMessageCount) : [];
   const replyTarget = buildReplyTarget(interaction.channelId, getChannelLabel(interaction.channel) ?? (interaction.inGuild() ? "Server channel" : "Direct message"), interaction.inGuild() ? "guild" : "dm");
@@ -422,7 +467,14 @@ async function buildDiscordRequestFromInteraction(config: BridgeConfig, interact
     prompt: interaction.options.getString("message", true),
     replyTarget,
     attachments,
-    contextMessages
+    contextMessages,
+    voiceContext: buildVoiceContext(
+      voiceManager,
+      interaction.guild,
+      interaction.user.id,
+      interaction.user.username,
+      getInteractionDisplayName(interaction)
+    )
   };
 }
 
@@ -435,7 +487,7 @@ async function respond(interaction: ChatInputCommandInteraction | ModalSubmitInt
   await interaction.reply({ content, ephemeral: interaction.inGuild() });
 }
 
-async function handleDmMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>): Promise<void> {
+async function handleDmMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>, voiceManager: VoiceManager): Promise<void> {
   const tenant = getTenantForDm(config, message.author.id);
   const command = readCommand(message.content);
   const tenantSecret = getTenantSecretState(state, tenant);
@@ -467,12 +519,12 @@ async function handleDmMessage(message: Message, config: BridgeConfig, state: Br
   Object.assign(state, rememberMessageId(state, message.id));
   await updateState(state);
 
-  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, message.content);
+  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, voiceManager, message.content);
   request.prompt = buildDiscordRelayPrompt(request);
   await onRelayRequest(request);
 }
 
-async function handleGuildMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>, botUserId: string): Promise<void> {
+async function handleGuildMessage(message: Message, config: BridgeConfig, state: BridgeState, updateState: (next: BridgeState) => Promise<void>, onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>, botUserId: string, voiceManager: VoiceManager): Promise<void> {
   if (!message.guildId) return;
 
   if (!isGuildChannelAllowed(state, message.guildId, message.channelId)) return;
@@ -493,7 +545,7 @@ async function handleGuildMessage(message: Message, config: BridgeConfig, state:
   await updateState(state);
 
   const promptContent = stripBotMentions(message.content, botUserId);
-  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, promptContent);
+  const request = await buildDiscordRequestFromMessage(config, state, message, tenant, voiceManager, promptContent);
   request.prompt = buildDiscordRelayPrompt(request);
   await onRelayRequest(request);
 }
@@ -545,24 +597,25 @@ export async function startDiscordBot(
   state: BridgeState,
   updateState: (next: BridgeState) => Promise<void>,
   onRelayRequest: (request: DiscordRelayRequest) => Promise<PokeSendResult>
-): Promise<Client> {
+): Promise<{ client: Client; voiceManager: VoiceManager; }> {
   const client = new Client({
-    intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessages],
+    intents: [GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildVoiceStates],
     partials: [Partials.Channel]
   });
+  const voiceManager = createVoiceManager(client, async (channelId, content) => { await sendDiscordMessage(client, channelId, content); });
 
   client.on("messageCreate", async message => {
     if (message.author.bot) return;
 
     try {
       if (message.guildId == null) {
-        await handleDmMessage(message, config, state, updateState, onRelayRequest);
+        await handleDmMessage(message, config, state, updateState, onRelayRequest, voiceManager);
         return;
       }
 
       const botUserId = client.user?.id;
       if (!botUserId) return;
-      await handleGuildMessage(message, config, state, updateState, onRelayRequest, botUserId);
+      await handleGuildMessage(message, config, state, updateState, onRelayRequest, botUserId, voiceManager);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       await sendTextMessage(message.channel, `Poke bridge failed: ${reason}`);
@@ -711,7 +764,7 @@ export async function startDiscordBot(
 
       await interaction.deferReply({ ephemeral: interaction.inGuild() });
 
-      const request = await buildDiscordRequestFromInteraction(config, interaction as ChatInputCommandInteraction, tenant);
+      const request = await buildDiscordRequestFromInteraction(config, interaction as ChatInputCommandInteraction, tenant, voiceManager);
       request.prompt = buildDiscordRelayPrompt(request);
       await onRelayRequest(request);
       await interaction.editReply("Sent to Poke.");
@@ -737,7 +790,7 @@ export async function startDiscordBot(
   });
 
   await client.login(config.discordToken);
-  return client;
+  return { client, voiceManager };
 }
 
 function isReactableMessage(message: unknown): message is { react: (emoji: string) => Promise<unknown>; } {

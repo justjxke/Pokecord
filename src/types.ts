@@ -74,6 +74,44 @@ export interface DiscordChannelHistoryMessage {
   attachments: DiscordChannelHistoryAttachment[];
 }
 
+export interface DiscordVoiceChannelSnapshot {
+  id: string | null;
+  name: string | null;
+}
+
+export interface DiscordVoiceUserSnapshot {
+  userId: string;
+  username: string;
+  displayName: string;
+  profileSummary: string;
+  voiceChannel: DiscordVoiceChannelSnapshot;
+}
+
+export interface DiscordVoiceTrackSummary {
+  id: string;
+  title: string;
+  url: string;
+  requestedByUserId: string;
+  requestedByName: string;
+  requestedAt: string;
+}
+
+export interface DiscordVoiceSessionSnapshot {
+  guildId: string;
+  connected: boolean;
+  voiceChannel: DiscordVoiceChannelSnapshot;
+  textChannelId: string | null;
+  currentTrack: DiscordVoiceTrackSummary | null;
+  queue: DiscordVoiceTrackSummary[];
+  paused: boolean;
+  idleLeavesAt: string | null;
+}
+
+export interface DiscordVoiceContext {
+  requester: DiscordVoiceUserSnapshot;
+  bot: DiscordVoiceSessionSnapshot | null;
+}
+
 export interface DiscordOutboundAttachment {
   name?: string;
   url: string;
@@ -136,6 +174,7 @@ export interface DiscordRelayRequest {
   replyTarget: DiscordReplyTarget;
   attachments: DiscordAttachmentContext[];
   contextMessages: DiscordMessageContext[];
+  voiceContext: DiscordVoiceContext | null;
 }
 
 export interface PokeSendResult {
