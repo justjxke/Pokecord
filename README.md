@@ -13,11 +13,13 @@ Discord bridge for Poke, hosted 24/7. No self-hosting required:
 ## Quick Start
 
 1. Install the bot with [this invite link](https://discord.com/oauth2/authorize?client_id=1488275565214433481).
-2. Use the recipe URL: [https://poke.com/r/znEEJgJ1DDx](https://poke.com/r/znEEJgJ1DDx).
+2. Use the MCP server URL: [https://mcs.creations.works/jake-mcp/mcp](https://mcs.creations.works/jake-mcp/mcp).
 3. For your own private use, open a DM with the bot and run `/poke setup`.
 4. For a server, ask a server admin or owner to run `/poke setup`.
 5. Use `/poke status` or `!status` to confirm the link.
 6. Send messages normally after setup.
+
+Note: `https://mcs.creations.works/jake-mcp/` is the mounted base path. The actual MCP entrypoint is `/mcp`.
 
 ## Setup
 
