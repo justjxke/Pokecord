@@ -1,18 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 
-import {
-  AudioPlayerStatus,
-  NoSubscriberBehavior,
-  StreamType,
-  VoiceConnectionStatus,
-  createAudioPlayer,
-  createAudioResource,
-  entersState,
-  getVoiceConnection,
-  joinVoiceChannel
-} from "@discordjs/voice";
 import type { Client, Guild } from "discord.js";
-import play, { stream_from_info, video_basic_info, yt_validate } from "play-dl";
 
 import type {
   DiscordVoiceChannelSnapshot,
@@ -25,6 +14,9 @@ import type {
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const VOICE_READY_TIMEOUT_MS = 30_000;
 
+type VoiceApi = typeof import("@discordjs/voice");
+type PlayDlApi = typeof import("play-dl");
+
 type VoiceTrack = DiscordVoiceTrackSummary;
 
 interface VoiceSession {
@@ -36,7 +28,8 @@ interface VoiceSession {
   currentTrack: VoiceTrack | null;
   idleLeaveAt: number | null;
   idleLeaveTimer: NodeJS.Timeout | null;
-  player: ReturnType<typeof createAudioPlayer>;
+  player: any;
+  connection: any;
   destroyed: boolean;
   playNonce: number;
 }
@@ -83,6 +76,63 @@ export interface VoiceManager {
   getSessionSnapshot(guildId: string): DiscordVoiceSessionSnapshot | null;
 }
 
+interface VoiceLibraries {
+  discordVoice: Pick<VoiceApi, "AudioPlayerStatus" | "NoSubscriberBehavior" | "StreamType" | "VoiceConnectionStatus" | "createAudioPlayer" | "createAudioResource" | "entersState" | "getVoiceConnection" | "joinVoiceChannel">;
+  playDl: Pick<PlayDlApi, "stream_from_info" | "video_basic_info" | "yt_validate">;
+}
+
+let voiceLibrariesPromise: Promise<VoiceLibraries> | null = null;
+let voiceInstallAttempted = false;
+
+function installVoiceDependencies(): void {
+  if (voiceInstallAttempted) return;
+  voiceInstallAttempted = true;
+
+  const result = spawnSync("bun", ["install", "--frozen-lockfile"], {
+    cwd: process.cwd(),
+    stdio: "inherit"
+  });
+
+  if (result.status !== 0) {
+    throw new Error("Voice playback dependencies are not installed on this host and bun install failed.");
+  }
+}
+
+async function loadVoiceLibraries(): Promise<VoiceLibraries> {
+  if (!voiceLibrariesPromise) {
+    voiceLibrariesPromise = (async () => {
+      try {
+        const [discordVoice, playDl] = await Promise.all([
+          import("@discordjs/voice"),
+          import("play-dl")
+        ]);
+
+        return {
+          discordVoice,
+          playDl
+        };
+      } catch (error) {
+        try {
+          installVoiceDependencies();
+          const [discordVoice, playDl] = await Promise.all([
+            import("@discordjs/voice"),
+            import("play-dl")
+          ]);
+
+          return {
+            discordVoice,
+            playDl
+          };
+        } catch {
+          throw new Error(`Voice playback dependencies are not installed on this host. Run bun install to enable voice playback. ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    })();
+  }
+
+  return voiceLibrariesPromise;
+}
+
 function canonicalVoiceChannel(channelId: string | null, channelName: string | null): DiscordVoiceChannelSnapshot {
   return {
     id: channelId,
@@ -109,7 +159,7 @@ function summarizeSession(session: VoiceSession): DiscordVoiceSessionSnapshot {
     textChannelId: session.textChannelId,
     currentTrack: session.currentTrack ? summarizeTrack(session.currentTrack) : null,
     queue: session.queue.map(summarizeTrack),
-    paused: session.player.state.status === AudioPlayerStatus.Paused,
+    paused: session.player.state.status === "paused" || session.player.state.status === "autopaused",
     idleLeavesAt: session.idleLeaveAt == null ? null : new Date(session.idleLeaveAt).toISOString()
   };
 }
@@ -134,12 +184,13 @@ function describeUrl(url: string): string {
 }
 
 async function buildTrack(input: Pick<QueueVoiceTrackInput, "requesterDisplayName" | "requesterId" | "url">): Promise<VoiceTrack> {
-  const validation = yt_validate(input.url);
+  const { playDl } = await loadVoiceLibraries();
+  const validation = playDl.yt_validate(input.url);
   if (validation !== "video") {
     throw new Error("Only YouTube video URLs are supported.");
   }
 
-  const info = await video_basic_info(input.url);
+  const info = await playDl.video_basic_info(input.url);
   const title = info.video_details.title?.trim() || describeUrl(input.url);
   return {
     id: randomUUID(),
@@ -232,19 +283,20 @@ const sessionsRef = {
 };
 
 async function createSession(client: Client, guildId: string, voiceChannelId: string, voiceChannelName: string | null, textChannelId: string | null, announce: (channelId: string, content: string) => Promise<void>): Promise<VoiceSession> {
+  const { discordVoice } = await loadVoiceLibraries();
   const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
-  const existingConnection = getVoiceConnection(guildId);
+  const existingConnection = discordVoice.getVoiceConnection(guildId);
   if (existingConnection) {
     existingConnection.destroy();
   }
 
-  const player = createAudioPlayer({
+  const player = discordVoice.createAudioPlayer({
     behaviors: {
-      noSubscriber: NoSubscriberBehavior.Pause
+      noSubscriber: discordVoice.NoSubscriberBehavior.Pause
     }
   });
 
-  const connection = joinVoiceChannel({
+  const connection = discordVoice.joinVoiceChannel({
     channelId: voiceChannelId,
     guildId,
     adapterCreator: guild.voiceAdapterCreator,
@@ -261,6 +313,7 @@ async function createSession(client: Client, guildId: string, voiceChannelId: st
     idleLeaveAt: null,
     idleLeaveTimer: null,
     player,
+    connection,
     destroyed: false,
     playNonce: 0
   };
@@ -268,7 +321,7 @@ async function createSession(client: Client, guildId: string, voiceChannelId: st
   sessionsRef.current.set(guildId, session);
   connection.subscribe(player);
 
-  player.on(AudioPlayerStatus.Idle, () => {
+  player.on(discordVoice.AudioPlayerStatus.Idle, () => {
     void advanceQueue(client, session, announce);
   });
 
@@ -278,16 +331,16 @@ async function createSession(client: Client, guildId: string, voiceChannelId: st
   });
 
   connection.on("stateChange", (_, next) => {
-    if (next.status === VoiceConnectionStatus.Destroyed) {
+    if (next.status === discordVoice.VoiceConnectionStatus.Destroyed) {
       session.destroyed = true;
       sessionsRef.current.delete(guildId);
       return;
     }
 
-    if (next.status === VoiceConnectionStatus.Disconnected) {
+    if (next.status === discordVoice.VoiceConnectionStatus.Disconnected) {
       void (async () => {
         try {
-          await entersState(connection, VoiceConnectionStatus.Signalling, 5_000);
+          await discordVoice.entersState(connection, discordVoice.VoiceConnectionStatus.Signalling, 5_000);
         } catch {
           if (!session.destroyed) {
             connection.destroy();
@@ -298,7 +351,7 @@ async function createSession(client: Client, guildId: string, voiceChannelId: st
   });
 
   try {
-    await entersState(connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+    await discordVoice.entersState(connection, discordVoice.VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
   } catch (error) {
     connection.destroy();
     sessionsRef.current.delete(guildId);
@@ -321,8 +374,7 @@ function destroySession(sessions: Map<string, VoiceSession>, guildId: string): v
     // Ignore stop failures during teardown.
   }
   try {
-    const connection = getVoiceConnection(guildId);
-    connection?.destroy();
+    session.connection?.destroy();
   } catch {
     // Ignore teardown failures.
   }
@@ -344,14 +396,15 @@ async function advanceQueue(client: Client, session: VoiceSession, announce: (ch
   const nonce = ++session.playNonce;
 
   try {
-    const info = await video_basic_info(buildResourceUrl(nextTrack));
+    const { discordVoice, playDl } = await loadVoiceLibraries();
+    const info = await playDl.video_basic_info(buildResourceUrl(nextTrack));
     if (session.destroyed || session.playNonce !== nonce) return;
 
-    const source = await stream_from_info(info, { discordPlayerCompatibility: true });
+    const source = await playDl.stream_from_info(info, { discordPlayerCompatibility: true });
     if (session.destroyed || session.playNonce !== nonce) return;
 
-    const resource = createAudioResource(source.stream, {
-      inputType: source.type as StreamType,
+    const resource = discordVoice.createAudioResource(source.stream, {
+      inputType: source.type as any,
       metadata: summarizeTrack(nextTrack)
     });
 
@@ -444,7 +497,8 @@ export function createVoiceManager(client: Client, announce: (channelId: string,
         session.queue.push(track);
       }
 
-      const shouldStart = !session.currentTrack && session.player.state.status === AudioPlayerStatus.Idle;
+      const { discordVoice } = await loadVoiceLibraries();
+      const shouldStart = !session.currentTrack && session.player.state.status === discordVoice.AudioPlayerStatus.Idle;
       if (shouldStart) {
         await advanceQueue(client, session, announce);
       }
@@ -508,13 +562,13 @@ export function createVoiceManager(client: Client, announce: (channelId: string,
           };
         }
         case "pause":
-          if (session.player.state.status === AudioPlayerStatus.Paused) {
+          if (session.player.state.status === "paused" || session.player.state.status === "autopaused") {
             return { ok: true, action: "pause", message: "Already paused.", session: queueSnapshot(session) };
           }
           session.player.pause(true);
           return { ok: true, action: "pause", message: "Paused playback.", session: queueSnapshot(session) };
         case "resume":
-          if (session.player.state.status !== AudioPlayerStatus.Paused) {
+          if (session.player.state.status !== "paused" && session.player.state.status !== "autopaused") {
             return { ok: true, action: "resume", message: "Playback is not paused.", session: queueSnapshot(session) };
           }
           session.player.unpause();
