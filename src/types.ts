@@ -60,6 +60,21 @@ export interface DiscordAttachmentContext {
   size: number;
 }
 
+export interface DiscordChannelHistoryAttachment {
+  url: string;
+  name: string;
+  contentType: string | null;
+}
+
+export interface DiscordChannelHistoryMessage {
+  id: string;
+  content: string;
+  author: string;
+  timestamp: string;
+  isReply: boolean;
+  attachments: DiscordChannelHistoryAttachment[];
+}
+
 export interface DiscordOutboundAttachment {
   name?: string;
   url: string;

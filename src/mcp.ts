@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import type { BridgeState, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
+import type { BridgeState, DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
 
 interface StartMcpServerOptions {
   host: string;
@@ -12,6 +12,7 @@ interface StartMcpServerOptions {
   onEditDiscordMessage: (meta: { content?: string; embeds?: DiscordOutboundEmbed[]; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onReactDiscordMessage: (meta: { emoji: string; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
+  onGetChannelHistory: (meta: { channelId: string; limit: number; }) => Promise<DiscordChannelHistoryMessage[]>;
 }
 
 interface JsonRpcRequest {
@@ -41,6 +42,8 @@ const DELETE_TOOL_NAME = "deleteDiscordMessage";
 const DELETE_TOOL_DESCRIPTION = "Delete a specific Discord message the bridge already sent.";
 const REACT_TOOL_NAME = "reactToDiscordMessage";
 const REACT_TOOL_DESCRIPTION = "Add an emoji reaction to a Discord message.";
+const HISTORY_TOOL_NAME = "getChannelHistory";
+const HISTORY_TOOL_DESCRIPTION = "Get recent messages from a Discord channel.";
 const MAX_BODY_BYTES = 128_000;
 const EDGE_SECRET_HEADER = "x-poke-edge-secret";
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id, X-Poke-Edge-Secret";
@@ -105,6 +108,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length ? value.trim() : undefined;
+}
+
+function readLimit(value: unknown, fallback: number): number {
+  if (value == null) return fallback;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+    throw new Error("limit must be an integer between 1 and 100");
+  }
+  return parsed;
 }
 
 function parseAttachments(value: unknown): DiscordOutboundAttachment[] | undefined {
@@ -292,6 +304,21 @@ async function handleReactToolCall(args: Record<string, unknown>, onReactDiscord
     reacted: true,
     emoji,
     messageId
+  };
+}
+
+async function handleGetChannelHistoryToolCall(args: Record<string, unknown>, onGetChannelHistory: StartMcpServerOptions["onGetChannelHistory"]): Promise<unknown> {
+  const channelId = readString(args.channelId);
+  if (!channelId) {
+    throw new Error("channelId is required");
+  }
+
+  const limit = readLimit(args.limit, 50);
+  const result = await onGetChannelHistory({ channelId, limit });
+  return {
+    channelId,
+    limit,
+    messages: result
   };
 }
 
@@ -625,6 +652,28 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
               },
               required: ["emoji", "messageId"]
             }
+          },
+          {
+            name: HISTORY_TOOL_NAME,
+            description: HISTORY_TOOL_DESCRIPTION,
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                channelId: {
+                  type: "string",
+                  description: "Discord channel id to read history from."
+                },
+                limit: {
+                  type: "number",
+                  description: "Number of recent messages to fetch.",
+                  default: 50,
+                  minimum: 1,
+                  maximum: 100
+                }
+              },
+              required: ["channelId"]
+            }
           }
         ]
       }
@@ -635,7 +684,7 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
     const name = typeof request.params?.name === "string" ? request.params.name : "";
     const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
 
-    if (name !== SEND_TOOL_NAME && name !== REPLY_TOOL_NAME && name !== EDIT_TOOL_NAME && name !== DELETE_TOOL_NAME && name !== REACT_TOOL_NAME) {
+    if (name !== SEND_TOOL_NAME && name !== REPLY_TOOL_NAME && name !== EDIT_TOOL_NAME && name !== DELETE_TOOL_NAME && name !== REACT_TOOL_NAME && name !== HISTORY_TOOL_NAME) {
       return { jsonrpc: "2.0", id: request.id ?? null, error: { code: -32602, message: `Unknown tool: ${name}` } };
     }
 
@@ -648,7 +697,9 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
             ? await handleEditToolCall(args, options.onEditDiscordMessage)
             : name === DELETE_TOOL_NAME
               ? await handleDeleteToolCall(args, options.onDeleteDiscordMessage)
-              : await handleReactToolCall(args, options.onReactDiscordMessage);
+              : name === REACT_TOOL_NAME
+                ? await handleReactToolCall(args, options.onReactDiscordMessage)
+                : await handleGetChannelHistoryToolCall(args, options.onGetChannelHistory);
       return {
         jsonrpc: "2.0",
         id: request.id ?? null,

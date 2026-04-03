@@ -1,5 +1,5 @@
 import { loadConfig } from "./config";
-import { startDiscordBot, startTypingIndicator, sendDiscordMessage, sendDiscordReaction, editDiscordMessage, deleteDiscordMessage } from "./discordBot";
+import { getDiscordChannelHistory, startDiscordBot, startTypingIndicator, sendDiscordMessage, sendDiscordReaction, editDiscordMessage, deleteDiscordMessage } from "./discordBot";
 import { getTenantPokeSecret } from "./bridgePolicy";
 import { startMcpServer } from "./mcp";
 import { loadState, saveState, type BridgeState } from "./state";
@@ -153,6 +153,10 @@ async function main(): Promise<void> {
       const channelId = resolveReplyTarget(pendingTargets, meta);
       if (!meta.messageId) throw new Error("Discord message id is required.");
       await sendDiscordReaction(discordClient, channelId, meta.messageId, meta.emoji);
+    },
+    onGetChannelHistory: async meta => {
+      if (discordClient == null) throw new Error("Discord client is not ready.");
+      return getDiscordChannelHistory(discordClient, meta.channelId, meta.limit);
     }
   });
 

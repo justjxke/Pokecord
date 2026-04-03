@@ -35,6 +35,7 @@ import { rememberMessageId, type BridgeState } from "./state";
 import type {
   BridgeConfig,
   DiscordAttachmentContext,
+  DiscordChannelHistoryMessage,
   DiscordMessageContext,
   DiscordOutboundAttachment,
   DiscordOutboundEmbed,
@@ -74,6 +75,14 @@ function formatAttachment(attachment: { name: string; url: string; contentType?:
 
 function getMessageAttachments(message: Message): DiscordAttachmentContext[] {
   return Array.from(message.attachments.values()).map(formatAttachment);
+}
+
+function formatChannelHistoryAttachment(attachment: { url: string; name: string; contentType?: string | null; }): { url: string; name: string; contentType: string | null; } {
+  return {
+    url: attachment.url,
+    name: attachment.name,
+    contentType: attachment.contentType ?? null
+  };
 }
 
 function getCommandAttachments(interaction: ChatInputCommandInteraction): DiscordAttachmentContext[] {
@@ -235,6 +244,29 @@ async function collectChannelContext(channel: Message["channel"] | ChatInputComm
   } catch {
     return [];
   }
+}
+
+export async function getDiscordChannelHistory(client: Client, channelId: string, limit = 50): Promise<DiscordChannelHistoryMessage[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("limit must be between 1 and 100");
+  }
+
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased() || !("messages" in channel)) {
+    throw new Error("Discord channel not found.");
+  }
+
+  const fetched = await channel.messages.fetch({ limit });
+  return Array.from(fetched.values())
+    .sort((left, right) => left.createdTimestamp - right.createdTimestamp)
+    .map(message => ({
+      id: message.id,
+      content: message.content,
+      author: message.author.username,
+      timestamp: new Date(message.createdTimestamp).toISOString(),
+      isReply: message.reference != null,
+      attachments: Array.from(message.attachments.values()).map(formatChannelHistoryAttachment)
+    }));
 }
 
 function isLikelyPokeApiKey(value: string): boolean {
