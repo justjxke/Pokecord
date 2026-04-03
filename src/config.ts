@@ -25,11 +25,6 @@ function loadDotEnv(path = DOTENV_PATH): void {
   }
 }
 
-function readBoolean(value: string | undefined, fallback: boolean): boolean {
-  if (value == null) return fallback;
-  return value !== "0" && value.toLowerCase() !== "false";
-}
-
 function readNumber(value: string | undefined, fallback: number): number {
   const parsed = value == null ? Number.NaN : Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -54,7 +49,6 @@ export function loadConfig(): BridgeConfig {
     mcpHost: process.env.POKE_MCP_HOST ?? DEFAULT_MCP_HOST,
     mcpPort: readNumber(process.env.POKE_MCP_PORT, DEFAULT_MCP_PORT),
     statePath,
-    autoTunnel: readBoolean(process.env.POKE_AUTO_TUNNEL, false),
     contextMessageCount: readNumber(process.env.POKE_CONTEXT_MESSAGES, DEFAULT_CONTEXT_MESSAGE_COUNT),
     edgeSecret,
     stateSecret,

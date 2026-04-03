@@ -1,5 +1,3 @@
-import { spawn, type ChildProcess } from "node:child_process";
-
 import { loadConfig } from "./config";
 import { startDiscordBot, startTypingIndicator, sendDiscordMessage, sendDiscordReaction, editDiscordMessage, deleteDiscordMessage } from "./discordBot";
 import { getTenantPokeSecret } from "./bridgePolicy";
@@ -36,20 +34,6 @@ function logHostUrlHints(): void {
   } else {
     log("Host URL hints: none");
   }
-}
-
-async function startTunnel(port: number, enabled: boolean): Promise<ChildProcess | null> {
-  if (!enabled) return null;
-
-  const child = spawn("npx", ["poke@latest", "tunnel", `http://127.0.0.1:${port}/mcp`, "-n", "Poke Discord Bridge", "--recipe"], {
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-
-  child.stdout.on("data", chunk => log(String(chunk).trim()));
-  child.stderr.on("data", chunk => log(String(chunk).trim()));
-  child.on("exit", code => log(`Tunnel exited with code ${code ?? 0}.`));
-
-  return child;
 }
 
 function rememberPendingTarget(targets: Map<string, DiscordReplyTarget>, request: DiscordRelayRequest): void {
@@ -129,7 +113,6 @@ async function main(): Promise<void> {
   const pendingTargets = new Map<string, DiscordReplyTarget>();
   const sentMessages = new Map<string, DiscordSentMessageRecord>();
   let discordClient: Awaited<ReturnType<typeof startDiscordBot>> | null = null;
-  let tunnelProcess: ChildProcess | null = null;
 
   let saveQueue = Promise.resolve();
   const persistState = async (next: BridgeState) => {
@@ -176,7 +159,6 @@ async function main(): Promise<void> {
   log(`MCP server listening on http://${config.mcpHost}:${mcp.port}`);
   log(`Bridge mode: ${config.bridgeMode}`);
   logHostUrlHints();
-  tunnelProcess = await startTunnel(mcp.port, config.autoTunnel);
 
   discordClient = await startDiscordBot(config, state, async next => persistState(next), async request => {
     rememberPendingTarget(pendingTargets, request);
@@ -212,7 +194,6 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     log("Shutting down...");
     clearInterval(cleanupInterval);
-    tunnelProcess?.kill();
     await persistState(state);
     await discordClient?.destroy();
     await new Promise<void>(resolve => mcp.server.close(() => resolve()));

@@ -38,7 +38,6 @@ export interface BridgeConfig {
   mcpHost: string;
   mcpPort: number;
   statePath: string;
-  autoTunnel: boolean;
   contextMessageCount: number;
   edgeSecret: string | null;
   stateSecret: string;
