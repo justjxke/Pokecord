@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 
 import type { Client, Guild } from "discord.js";
 
@@ -82,21 +81,6 @@ interface VoiceLibraries {
 }
 
 let voiceLibrariesPromise: Promise<VoiceLibraries> | null = null;
-let voiceInstallAttempted = false;
-
-function installVoiceDependencies(): void {
-  if (voiceInstallAttempted) return;
-  voiceInstallAttempted = true;
-
-  const result = spawnSync("bun", ["install", "--frozen-lockfile"], {
-    cwd: process.cwd(),
-    stdio: "inherit"
-  });
-
-  if (result.status !== 0) {
-    throw new Error("Voice playback dependencies are not installed on this host and bun install failed.");
-  }
-}
 
 async function loadVoiceLibraries(): Promise<VoiceLibraries> {
   if (!voiceLibrariesPromise) {
@@ -112,20 +96,7 @@ async function loadVoiceLibraries(): Promise<VoiceLibraries> {
           playDl
         };
       } catch (error) {
-        try {
-          installVoiceDependencies();
-          const [discordVoice, playDl] = await Promise.all([
-            import("@discordjs/voice"),
-            import("play-dl")
-          ]);
-
-          return {
-            discordVoice,
-            playDl
-          };
-        } catch {
-          throw new Error(`Voice playback dependencies are not installed on this host. Run bun install to enable voice playback. ${error instanceof Error ? error.message : String(error)}`);
-        }
+        throw new Error(`Voice playback dependencies are not installed on this host. Run bun install to enable voice playback. ${error instanceof Error ? error.message : String(error)}`);
       }
     })();
   }
