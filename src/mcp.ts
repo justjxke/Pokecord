@@ -117,6 +117,12 @@ function readLimit(value: unknown, fallback: number): number {
   return parsed;
 }
 
+function matchesRoute(path: string, route: string): boolean {
+  const normalizedPath = path.replace(/\/+$/, "");
+  const normalizedRoute = route.replace(/\/+$/, "");
+  return normalizedPath === normalizedRoute || normalizedPath.endsWith(normalizedRoute);
+}
+
 function parseAttachments(value: unknown): DiscordOutboundAttachment[] | undefined {
   if (!Array.isArray(value) || !value.length) return undefined;
 
@@ -747,7 +753,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       return;
     }
 
-    if (req.method === "GET" && path === "/health") {
+    if (req.method === "GET" && matchesRoute(path, "/health")) {
       const installationCount = Object.keys(options.state.guildInstallations).length;
       const linkedUsers = Object.values(options.state.users).filter(user => user.encryptedPokeApiKey != null).length;
       writeJson(res, 200, {
@@ -761,7 +767,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       return;
     }
 
-    if (req.method === "GET" && (path === "/mcp" || path === "/sse")) {
+    if (req.method === "GET" && (matchesRoute(path, "/mcp") || matchesRoute(path, "/sse"))) {
       const sessionId = randomUUID();
       const endpoint = getMessageEndpoint(options.host, listeningPort, sessionId);
 
@@ -779,7 +785,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
       return;
     }
 
-    if (req.method === "POST" && (path === "/messages" || path === "/messages/" || path === "/mcp")) {
+    if (req.method === "POST" && (matchesRoute(path, "/messages") || matchesRoute(path, "/mcp"))) {
       let body = "";
 
       try {
