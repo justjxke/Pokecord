@@ -16,6 +16,9 @@ import { normalizeMusicKey, rankArtistBoundTracks, type MusicSelectionCandidate 
 
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const VOICE_READY_TIMEOUT_MS = 30_000;
+const SPOTIFY_AUTH_ERROR_MESSAGE = "Spotify Data is missing";
+
+let spotifyTokenSetup: Promise<void> | null = null;
 
 type VoiceTrack = DiscordVoiceTrackSummary;
 
@@ -162,6 +165,47 @@ type PlayDlSpotifySearchResultLike = {
 
 function buildSpotifySearchQuery(artist: string, query?: string): string {
   return [artist.trim(), query?.trim()].filter(Boolean).join(" ").trim();
+}
+
+function readSpotifyAuthConfig():
+  | { clientId: string; clientSecret: string; refreshToken: string; market: string; }
+  | null {
+  const clientId = process.env.POKE_SPOTIFY_CLIENT_ID?.trim() || "";
+  const clientSecret = process.env.POKE_SPOTIFY_CLIENT_SECRET?.trim() || "";
+  const refreshToken = process.env.POKE_SPOTIFY_REFRESH_TOKEN?.trim() || "";
+  const market = process.env.POKE_SPOTIFY_MARKET?.trim() || "";
+
+  const anyConfigured = clientId.length || clientSecret.length || refreshToken.length || market.length;
+  if (!anyConfigured) return null;
+  if (!clientId || !clientSecret || !refreshToken || !market) {
+    throw new Error("POKE_SPOTIFY_CLIENT_ID, POKE_SPOTIFY_CLIENT_SECRET, POKE_SPOTIFY_REFRESH_TOKEN, and POKE_SPOTIFY_MARKET must all be set together.");
+  }
+
+  return { clientId, clientSecret, refreshToken, market };
+}
+
+async function ensureSpotifyAuthConfigured(): Promise<void> {
+  if (spotifyTokenSetup) {
+    await spotifyTokenSetup;
+    return;
+  }
+
+  const config = readSpotifyAuthConfig();
+  if (!config) {
+    spotifyTokenSetup = Promise.resolve();
+    return;
+  }
+
+  spotifyTokenSetup = playDl.setToken({
+    spotify: {
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: config.refreshToken,
+      market: config.market
+    }
+  });
+
+  await spotifyTokenSetup;
 }
 
 function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
@@ -515,10 +559,25 @@ export function createVoiceManager(client: Client, announce: (channelId: string,
       if (input.artist?.trim()) {
         const searchQuery = buildSpotifySearchQuery(input.artist, input.query);
         const { playDl } = voiceLibraries;
-        const searchResults = await playDl.search(searchQuery, {
-          source: { spotify: "track" },
-          limit: 10
-        });
+        try {
+          await ensureSpotifyAuthConfigured();
+        } catch (error) {
+          throw new Error(error instanceof Error ? error.message : String(error));
+        }
+
+        let searchResults;
+        try {
+          searchResults = await playDl.search(searchQuery, {
+            source: { spotify: "track" },
+            limit: 10
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes(SPOTIFY_AUTH_ERROR_MESSAGE)) {
+            throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or run play-dl authorization on the VPS, then restart. Send a direct link if you want to play right now.");
+          }
+          throw error;
+        }
 
         const rankedCandidates = rankArtistBoundTracks(
           searchResults.map(toMusicSelectionCandidate),
