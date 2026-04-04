@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import type { Client, Guild } from "discord.js";
-import { Connectors, LoadType, Shoukaku, type NodeOption, type Player, type Track, type LavalinkResponse } from "shoukaku";
 import * as playDl from "play-dl";
 
+import { LavalinkManager, type LavalinkPlayer, type LavalinkSearchResponse, type LavalinkTrack } from "./lavalinkClient";
 import type {
   BridgeConfig,
   DiscordVoiceChannelSnapshot,
@@ -21,7 +21,7 @@ const LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS = 15;
 const LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS = 60;
 
 let spotifyTokenSetup: Promise<void> | null = null;
-let lavalinkManager: Shoukaku | null = null;
+let lavalinkManager: LavalinkManager | null = null;
 
 interface VoiceTrack extends DiscordVoiceTrackSummary {
   encoded: string;
@@ -37,7 +37,7 @@ interface VoiceSession {
   currentTrack: VoiceTrack | null;
   idleLeaveAt: number | null;
   idleLeaveTimer: NodeJS.Timeout | null;
-  player: Player;
+  player: LavalinkPlayer;
   destroyed: boolean;
 }
 
@@ -215,33 +215,9 @@ function scheduleIdleLeave(
   }, IDLE_LEAVE_DELAY_MS);
 }
 
-function buildLavalinkNodeOption(config: BridgeConfig): NodeOption {
-  const parsed = config.lavalinkUrl.includes("://")
-    ? new URL(config.lavalinkUrl)
-    : new URL(`http://${config.lavalinkUrl}`);
-
-  return {
-    name: config.lavalinkName,
-    url: `${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`,
-    auth: config.lavalinkPassword,
-    secure: config.lavalinkSecure || parsed.protocol === "https:"
-  };
-}
-
-function getLavalinkManager(client: Client, config: BridgeConfig): Shoukaku {
+function getLavalinkManager(client: Client, config: BridgeConfig): LavalinkManager {
   if (!lavalinkManager) {
-    lavalinkManager = new Shoukaku(
-      new Connectors.DiscordJS(client),
-      [buildLavalinkNodeOption(config)],
-      {
-        resume: false,
-        reconnectTries: 3,
-        reconnectInterval: 5,
-        restTimeout: LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS,
-        moveOnDisconnect: true,
-        voiceConnectionTimeout: LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS
-      }
-    );
+    lavalinkManager = new LavalinkManager(client, config);
 
     lavalinkManager.on("error", error => {
       console.error("[poke-discord-bridge] Lavalink manager error:", error);
@@ -251,28 +227,28 @@ function getLavalinkManager(client: Client, config: BridgeConfig): Shoukaku {
   return lavalinkManager;
 }
 
-function getIdealNode(): ReturnType<Shoukaku["getIdealNode"]> {
-  return lavalinkManager?.getIdealNode();
+function getIdealNode(): LavalinkManager | null {
+  return lavalinkManager;
 }
 
-function selectLoadResultTrack(result: LavalinkResponse): Track | null {
-  switch (result.loadType) {
-    case LoadType.TRACK:
-      return result.data;
-    case LoadType.SEARCH:
-      return result.data[0] ?? null;
-    case LoadType.PLAYLIST:
-      return result.data.tracks[0] ?? null;
-    case LoadType.EMPTY:
-    case LoadType.ERROR:
-      return null;
-    default:
-      return null;
+function selectLoadResultTrack(result: LavalinkSearchResponse): LavalinkTrack | null {
+  if (result.loadType === "track") {
+    return result.data as LavalinkTrack;
   }
+
+  if (result.loadType === "search") {
+    return (result.data as LavalinkTrack[])[0] ?? null;
+  }
+
+  if (result.loadType === "playlist") {
+    return (result.data as { tracks: LavalinkTrack[] }).tracks[0] ?? null;
+  }
+
+  return null;
 }
 
 function buildTrackFromResolvedLavalinkTrack(
-  resolved: Track,
+  resolved: LavalinkTrack,
   sourceUrl: string,
   requesterId: string,
   requesterDisplayName: string

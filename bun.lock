@@ -7,7 +7,6 @@
       "dependencies": {
         "discord.js": "^14.19.3",
         "play-dl": "1.9.7",
-        "shoukaku": "4.3.0",
       },
       "devDependencies": {
         "@types/node": "^22.15.29",
@@ -55,8 +54,6 @@
     "play-audio": ["play-audio@0.5.2", "", {}, "sha512-ZAqHUKkQLix2Iga7pPbsf1LpUoBjcpwU93F1l3qBIfxYddQLhxS6GKmS0d3jV8kSVaUbr6NnOEcEMFvuX93SWQ=="],
 
     "play-dl": ["play-dl@1.9.7", "", { "dependencies": { "play-audio": "0.5.2" } }, "sha512-KpgerWxUCY4s9Mhze2qdqPhiqd8Ve6HufpH9mBH3FN+vux55qSh6WJKDabfie8IBHN7lnrAlYcT/UdGax58c2A=="],
-
-    "shoukaku": ["shoukaku@4.3.0", "", { "dependencies": { "ws": "^8.19.0" } }, "sha512-jMEqVKvquGEqysnOL7a1hmnOAEJO47kTLoS7cGJLbIya3olSlFkMq7jbrrENijnx8fujXvMgUmQqwEdQk/Rkug=="],
 
     "ts-mixer": ["ts-mixer@6.0.4", "", {}, "sha512-ufKpbmrugz5Aou4wcr5Wc1UUFWOLhq+Fm6qa6P0w0K5Qw2yhaUoiWszhCVuNQyNwrlGiscHOmqYoAox1PtvgjA=="],
 

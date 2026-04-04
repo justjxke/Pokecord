@@ -10,8 +10,7 @@
   },
   "dependencies": {
     "discord.js": "^14.19.3",
-    "play-dl": "1.9.7",
-    "shoukaku": "4.3.0"
+    "play-dl": "1.9.7"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",
