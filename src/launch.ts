@@ -104,7 +104,7 @@ async function main(): Promise<void> {
 
   const lavalinkEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    LAVALINK_SERVER_PORT: String(LAVALINK_PORT),
+    SERVER_PORT: String(LAVALINK_PORT),
     LAVALINK_SERVER_PASSWORD: process.env.POKE_LAVALINK_PASSWORD ?? process.env.LAVALINK_SERVER_PASSWORD
   };
 
