@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, writeFile, readFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { once } from "node:events";
 import { createConnection } from "node:net";
@@ -9,6 +9,7 @@ const LAVALINK_HOST = "127.0.0.1";
 const JAVA_DIR = "/data/jre";
 const JAVA_BIN = `${JAVA_DIR}/bin/java`;
 const LAVALINK_JAR = "/data/Lavalink.jar";
+const LAVALINK_CONFIG = "/data/application.yml";
 const JAVA_DOWNLOAD_URL = "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jre/hotspot/normal/eclipse";
 const LAVALINK_DOWNLOAD_URL = "https://github.com/lavalink-devs/Lavalink/releases/latest/download/Lavalink.jar";
 
@@ -55,6 +56,33 @@ async function download(url: string, destination: string): Promise<void> {
   await writeFile(destination, Buffer.from(await response.arrayBuffer()));
 }
 
+function escapeYamlString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function ensureLavalinkConfig(password: string): Promise<void> {
+  if (await exists(LAVALINK_CONFIG)) {
+    const current = await readFile(LAVALINK_CONFIG, "utf8");
+    if (current.includes(`port: ${LAVALINK_PORT}`) && current.includes(`password: "${escapeYamlString(password)}"`)) {
+      return;
+    }
+  }
+
+  log("Writing Lavalink config...");
+  await writeFile(
+    LAVALINK_CONFIG,
+    [
+      "server:",
+      `  port: ${LAVALINK_PORT}`,
+      "  address: 0.0.0.0",
+      "lavalink:",
+      "  server:",
+      `    password: "${escapeYamlString(password)}"`,
+      ""
+    ].join("\n")
+  );
+}
+
 async function ensureJava(): Promise<void> {
   if (await exists(JAVA_BIN)) return;
 
@@ -99,18 +127,20 @@ async function waitForTcpPort(host: string, port: number, timeoutMs: number): Pr
 async function main(): Promise<void> {
   log("Bootstrapping Lavalink...");
 
+  const lavalinkPassword = process.env.POKE_LAVALINK_PASSWORD ?? process.env.LAVALINK_SERVER_PASSWORD;
+  if (!lavalinkPassword) {
+    throw new Error("Missing POKE_LAVALINK_PASSWORD.");
+  }
+
+  await ensureLavalinkConfig(lavalinkPassword);
   await ensureJava();
   await ensureLavalinkJar();
 
   const lavalinkEnv: NodeJS.ProcessEnv = {
     ...process.env,
     SERVER_PORT: String(LAVALINK_PORT),
-    LAVALINK_SERVER_PASSWORD: process.env.POKE_LAVALINK_PASSWORD ?? process.env.LAVALINK_SERVER_PASSWORD
+    LAVALINK_SERVER_PASSWORD: lavalinkPassword
   };
-
-  if (!lavalinkEnv.LAVALINK_SERVER_PASSWORD) {
-    throw new Error("Missing POKE_LAVALINK_PASSWORD.");
-  }
 
   let bot: ReturnType<typeof spawn> | null = null;
   log(`Starting Lavalink on ${LAVALINK_HOST}:${LAVALINK_PORT}...`);
