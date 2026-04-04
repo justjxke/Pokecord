@@ -342,6 +342,30 @@ async function ensureSpotifyAuthConfigured(): Promise<void> {
   await spotifyTokenSetup;
 }
 
+async function ensureSpotifySearchReady(): Promise<void> {
+  await ensureSpotifyAuthConfigured();
+
+  const config = readSpotifyAuthConfig();
+  if (!config) {
+    return;
+  }
+
+  const refreshed = await playDl.refreshToken();
+  if (!refreshed) {
+    throw new Error("Spotify token refresh failed. Re-run authorization on the VPS and restart.");
+  }
+}
+
+export function isSpotifySearchResponseError(message: string): boolean {
+  return [
+    SPOTIFY_AUTH_ERROR_MESSAGE,
+    "tracks.items",
+    "Got 401 from the request",
+    "Got 403 from the request",
+    "Response Error :"
+  ].some(fragment => message.includes(fragment));
+}
+
 function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
   return {
     id: track.id,
@@ -614,7 +638,7 @@ async function resolveArtistTrack(
   requesterVoice: { id: string; name: string | null; }
 ): Promise<VoiceOperationResult> {
   const searchQuery = buildSpotifySearchQuery(input.artist ?? "", input.query);
-  await ensureSpotifyAuthConfigured();
+  await ensureSpotifySearchReady();
 
   let searchResults: PlayDlSpotifySearchResultLike[];
   try {
@@ -624,8 +648,8 @@ async function resolveArtistTrack(
     }) as PlayDlSpotifySearchResultLike[];
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes(SPOTIFY_AUTH_ERROR_MESSAGE)) {
-      throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or run play-dl authorization on the VPS, then restart. Send a direct link if you want to play right now.");
+    if (isSpotifySearchResponseError(message)) {
+      throw new Error("Spotify search failed on this VPS. Refresh the Spotify auth token and restart, then try again. Send a direct link if you want to play right now.");
     }
     throw error;
   }
