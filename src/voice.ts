@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 
+import * as discordVoice from "@discordjs/voice";
 import type { Client, Guild } from "discord.js";
+import * as playDl from "play-dl";
 
 import type {
   DiscordVoiceChannelSnapshot,
@@ -14,8 +16,6 @@ import { resolvePlayableTrackUrl, type PlayDlLike } from "./musicResolver";
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const VOICE_READY_TIMEOUT_MS = 30_000;
 
-type VoiceApi = typeof import("@discordjs/voice");
-type PlayDlApi = typeof import("play-dl");
 type VoiceTrack = DiscordVoiceTrackSummary;
 
 interface VoiceSession {
@@ -76,33 +76,11 @@ export interface VoiceManager {
 }
 
 interface VoiceLibraries {
-  discordVoice: Pick<VoiceApi, "AudioPlayerStatus" | "NoSubscriberBehavior" | "StreamType" | "VoiceConnectionStatus" | "createAudioPlayer" | "createAudioResource" | "entersState" | "getVoiceConnection" | "joinVoiceChannel">;
-  playDl: Pick<PlayDlApi, "search" | "sp_validate" | "spotify" | "stream_from_info" | "video_basic_info" | "yt_validate">;
+  discordVoice: Pick<typeof discordVoice, "AudioPlayerStatus" | "NoSubscriberBehavior" | "StreamType" | "VoiceConnectionStatus" | "createAudioPlayer" | "createAudioResource" | "entersState" | "getVoiceConnection" | "joinVoiceChannel">;
+  playDl: Pick<typeof playDl, "search" | "sp_validate" | "spotify" | "stream_from_info" | "video_basic_info" | "yt_validate">;
 }
 
-let voiceLibrariesPromise: Promise<VoiceLibraries> | null = null;
-
-async function loadVoiceLibraries(): Promise<VoiceLibraries> {
-  if (!voiceLibrariesPromise) {
-    voiceLibrariesPromise = (async () => {
-      try {
-        const [discordVoice, playDl] = await Promise.all([
-          import("@discordjs/voice"),
-          import("play-dl")
-        ]);
-
-        return {
-          discordVoice,
-          playDl
-        };
-      } catch (error) {
-        throw new Error(`Voice playback dependencies are not installed on this host. Run bun install to enable voice playback. ${error instanceof Error ? error.message : String(error)}`);
-      }
-    })();
-  }
-
-  return voiceLibrariesPromise;
-}
+const voiceLibraries: VoiceLibraries = { discordVoice, playDl };
 
 function canonicalVoiceChannel(channelId: string | null, channelName: string | null): DiscordVoiceChannelSnapshot {
   return {
@@ -155,7 +133,7 @@ function describeUrl(url: string): string {
 }
 
 async function buildTrack(input: Pick<QueueVoiceTrackInput, "requesterDisplayName" | "requesterId" | "url">): Promise<VoiceTrack> {
-  const { playDl } = await loadVoiceLibraries();
+  const { playDl } = voiceLibraries;
   const resolved = await resolvePlayableTrackUrl(playDl, input.url);
   const info = await playDl.video_basic_info(resolved.url);
   const title = info.video_details.title?.trim() || describeUrl(resolved.url);
@@ -250,7 +228,7 @@ const sessionsRef = {
 };
 
 async function createSession(client: Client, guildId: string, voiceChannelId: string, voiceChannelName: string | null, textChannelId: string | null, announce: (channelId: string, content: string) => Promise<void>): Promise<VoiceSession> {
-  const { discordVoice } = await loadVoiceLibraries();
+  const { discordVoice } = voiceLibraries;
   const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
   const existingConnection = discordVoice.getVoiceConnection(guildId);
   if (existingConnection) {
@@ -363,7 +341,7 @@ async function advanceQueue(client: Client, session: VoiceSession, announce: (ch
   const nonce = ++session.playNonce;
 
   try {
-    const { discordVoice, playDl } = await loadVoiceLibraries();
+    const { discordVoice, playDl } = voiceLibraries;
     const info = await playDl.video_basic_info(buildResourceUrl(nextTrack));
     if (session.destroyed || session.playNonce !== nonce) return;
 
@@ -464,7 +442,7 @@ export function createVoiceManager(client: Client, announce: (channelId: string,
         session.queue.push(track);
       }
 
-      const { discordVoice } = await loadVoiceLibraries();
+      const { discordVoice } = voiceLibraries;
       const shouldStart = !session.currentTrack && session.player.state.status === discordVoice.AudioPlayerStatus.Idle;
       if (shouldStart) {
         await advanceQueue(client, session, announce);
