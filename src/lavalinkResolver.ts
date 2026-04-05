@@ -39,7 +39,7 @@ export type PlayDlLike = {
   }): Promise<PlayDlYouTubeVideoLike[]>;
 };
 
-const YOUTUBE_MEDIA_URL_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const YOUTUBE_MEDIA_URL_CACHE_TTL_MS = 30 * 60 * 1000;
 const youtubeMediaUrlCache = new Map<string, { mediaUrl: string; expiresAt: number }>();
 
 function buildSpotifySearchQuery(track: PlayDlSpotifyTrackLike): string {
@@ -105,28 +105,56 @@ function selectBestYouTubeStreamUrl(info: PlayDlYouTubeInfoLike): string | null 
   return bestUrl;
 }
 
-async function resolveYouTubeMediaUrl(playDl: PlayDlLike, url: string): Promise<string> {
-  const cached = youtubeMediaUrlCache.get(url);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.mediaUrl;
-  }
+function canonicalizeYouTubeWatchUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return "";
 
   try {
-    const info = await playDl.decipher_info(await playDl.video_info(url), true);
-    const mediaUrl = selectBestYouTubeStreamUrl(info);
-    if (!mediaUrl) {
-      throw new Error("Couldn't find a playable YouTube stream.");
+    const parsed = new URL(trimmed);
+    const hostname = parsed.hostname.toLowerCase();
+    const isYouTubeHost = hostname === "youtu.be" || hostname === "youtube.com" || hostname.endsWith(".youtube.com");
+    if (!isYouTubeHost) return trimmed;
+
+    let videoId = "";
+
+    if (hostname === "youtu.be") {
+      videoId = parsed.pathname.split("/").filter(Boolean)[0] ?? "";
+    } else {
+      if (parsed.pathname === "/watch") {
+        videoId = parsed.searchParams.get("v")?.trim() ?? "";
+      } else {
+        const parts = parsed.pathname.split("/").filter(Boolean);
+        if (parts[0] === "shorts" || parts[0] === "live" || parts[0] === "embed") {
+          videoId = parts[1]?.trim() ?? "";
+        }
+      }
     }
 
-    youtubeMediaUrlCache.set(url, {
+    if (!videoId) return trimmed;
+    return `https://www.youtube.com/watch?v=${videoId}`;
+  } catch {
+    return trimmed;
+  }
+}
+
+async function cacheYouTubeMediaUrlForDiagnostics(playDl: PlayDlLike, url: string): Promise<void> {
+  const canonicalUrl = canonicalizeYouTubeWatchUrl(url);
+  if (!canonicalUrl) return;
+
+  const cached = youtubeMediaUrlCache.get(canonicalUrl);
+  if (cached && cached.expiresAt > Date.now()) return;
+
+  try {
+    const info = await playDl.decipher_info(await playDl.video_info(canonicalUrl), true);
+    const mediaUrl = selectBestYouTubeStreamUrl(info);
+    if (!mediaUrl) return;
+
+    youtubeMediaUrlCache.set(canonicalUrl, {
       mediaUrl,
       expiresAt: Date.now() + YOUTUBE_MEDIA_URL_CACHE_TTL_MS
     });
-
-    return mediaUrl;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to resolve a playable YouTube stream: ${message}`);
+  } catch {
+    // Diagnostic cache is best-effort only.
   }
 }
 
@@ -141,7 +169,14 @@ async function resolveSpotifyTrackToRankedYouTubeResults(
     throw new Error("Spotify auth is not configured. Set the Spotify auth env vars or send a direct link.");
   }
 
-  const track = await spotifyTrackFetcher(url, spotifyConfig);
+  let track: SpotifySearchTrack;
+  try {
+    track = await spotifyTrackFetcher(url, spotifyConfig);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Spotify metadata fetch failed${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
+  }
+
   let results: PlayDlYouTubeVideoLike[] = [];
   try {
     results = await playDl.search(buildSpotifySearchQuery(track), {
@@ -152,7 +187,7 @@ async function resolveSpotifyTrackToRankedYouTubeResults(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`YouTube search failed while resolving Spotify track${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
+    throw new Error(`YouTube candidate search failed${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
   }
 
   return rankYouTubeVideoResults(track, results);
@@ -175,7 +210,9 @@ export async function resolveLavalinkTrackIdentifier(
     }
 
     if (youtubeValidation === "video") {
-      return await resolveYouTubeMediaUrl(playDl, url);
+      const canonicalUrl = canonicalizeYouTubeWatchUrl(url);
+      void cacheYouTubeMediaUrlForDiagnostics(playDl, canonicalUrl);
+      return canonicalUrl || url.trim();
     }
 
     let spotifyValidation: ReturnType<PlayDlLike["sp_validate"]>;
@@ -188,18 +225,13 @@ export async function resolveLavalinkTrackIdentifier(
 
     if (spotifyValidation === "track") {
       const rankedResults = await resolveSpotifyTrackToRankedYouTubeResults(playDl, url, spotifyConfig, spotifyTrackFetcher, bridgeRequestId);
-      let lastError: unknown = null;
-
-      for (const selected of rankedResults) {
-        try {
-          return await resolveYouTubeMediaUrl(playDl, selected.url);
-        } catch (error) {
-          lastError = error;
-        }
+      const selected = rankedResults[0];
+      if (!selected?.url?.trim()) {
+        throw new Error("YouTube candidate search failed to return a usable match.");
       }
-
-      const lastMessage = lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "";
-      throw new Error(`Couldn't find a playable YouTube version.${lastMessage ? ` ${lastMessage}` : ""}`.trim());
+      const canonicalUrl = canonicalizeYouTubeWatchUrl(selected.url);
+      void cacheYouTubeMediaUrlForDiagnostics(playDl, canonicalUrl);
+      return canonicalUrl || selected.url.trim();
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
