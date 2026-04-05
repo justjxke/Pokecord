@@ -71,8 +71,7 @@ async function download(url: string, destination: string): Promise<void> {
   await writeFile(destination, Buffer.from(await response.arrayBuffer()));
 }
 
-async function ensureLavalinkConfig(password: string): Promise<void> {
-  const desired = buildLavalinkConfig(password);
+async function ensureLavalinkConfig(desired: string): Promise<void> {
   if (await exists(LAVALINK_CONFIG)) {
     const current = await readFile(LAVALINK_CONFIG, "utf8");
     if (current === desired) {
@@ -324,7 +323,15 @@ async function main(): Promise<void> {
   }, RUNTIME_CLEANUP_INTERVAL_MS);
 
   log("Bootstrapping Lavalink...");
-  await ensureLavalinkConfig(lavalinkPassword);
+  await ensureLavalinkConfig(buildLavalinkConfig(lavalinkPassword, {
+    youtubePoToken: config.youtubePoToken,
+    youtubeVisitorData: config.youtubeVisitorData,
+    youtubeOauthRefreshToken: config.youtubeOauthRefreshToken,
+    youtubeOauthSkipInitialization: config.youtubeOauthSkipInitialization
+  }));
+  if (!config.youtubeOauthRefreshToken && !(config.youtubePoToken && config.youtubeVisitorData)) {
+    log("YouTube playback is running without OAuth or poToken. Login-gated videos may resolve in search and then fail at playback.");
+  }
   await ensureJava();
   await ensureLavalinkJar();
 

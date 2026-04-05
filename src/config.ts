@@ -32,6 +32,14 @@ function readNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value == null) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  return fallback;
+}
+
 export function loadConfig(): BridgeConfig {
   loadDotEnv();
   const discordToken = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN ?? "";
@@ -45,11 +53,21 @@ export function loadConfig(): BridgeConfig {
   const lavalinkPassword = process.env.POKE_LAVALINK_PASSWORD?.trim() || "";
   const lavalinkSecure = process.env.POKE_LAVALINK_SECURE == null ? DEFAULT_LAVALINK_SECURE : process.env.POKE_LAVALINK_SECURE.trim().toLowerCase() === "true";
   const lavalinkName = process.env.POKE_LAVALINK_NAME?.trim() || DEFAULT_LAVALINK_NAME;
+  const youtubePoToken = process.env.POKE_YOUTUBE_POT_TOKEN?.trim() || null;
+  const youtubeVisitorData = process.env.POKE_YOUTUBE_VISITOR_DATA?.trim() || null;
+  const youtubeOauthRefreshToken = process.env.POKE_YOUTUBE_OAUTH_REFRESH_TOKEN?.trim() || null;
+  const youtubeOauthSkipInitialization = readBoolean(process.env.POKE_YOUTUBE_OAUTH_SKIP_INITIALIZATION, true);
 
   if (!discordToken.trim()) throw new Error("Missing DISCORD_BOT_TOKEN.");
   if (!stateSecret) throw new Error("Missing POKE_STATE_SECRET.");
   if (!lavalinkUrl) throw new Error("Missing POKE_LAVALINK_URL.");
   if (!lavalinkPassword) throw new Error("Missing POKE_LAVALINK_PASSWORD.");
+  if ((youtubePoToken == null) !== (youtubeVisitorData == null)) {
+    throw new Error("POKE_YOUTUBE_POT_TOKEN and POKE_YOUTUBE_VISITOR_DATA must be set together.");
+  }
+  if (youtubePoToken && youtubeOauthRefreshToken) {
+    throw new Error("POKE_YOUTUBE_POT_TOKEN/POKE_YOUTUBE_VISITOR_DATA and POKE_YOUTUBE_OAUTH_REFRESH_TOKEN are mutually exclusive.");
+  }
 
   return {
     discordToken: discordToken.trim(),
@@ -65,6 +83,10 @@ export function loadConfig(): BridgeConfig {
     lavalinkPassword,
     lavalinkSecure,
     lavalinkName,
+    youtubePoToken,
+    youtubeVisitorData,
+    youtubeOauthRefreshToken,
+    youtubeOauthSkipInitialization,
     bridgeMode: "hybrid"
   };
 }
