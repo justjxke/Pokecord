@@ -20,7 +20,6 @@ const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS = 15;
 const LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS = 60;
 
-let spotifyTokenSetup: Promise<void> | null = null;
 let lavalinkManager: LavalinkManager | null = null;
 
 interface VoiceTrack extends DiscordVoiceTrackSummary {
@@ -266,6 +265,7 @@ function buildTrackFromResolvedLavalinkTrack(
 }
 
 async function resolvePlayableTrackForQueue(
+  bridgeRequestId: string,
   sourceUrl: string,
   sourceTitle: string | null,
   requesterId: string,
@@ -276,7 +276,7 @@ async function resolvePlayableTrackForQueue(
     throw new Error("Lavalink is not ready.");
   }
 
-  const identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl, spotifyConfig);
+  const identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl, spotifyConfig, undefined, bridgeRequestId);
   const node = getIdealNode();
   if (!node) {
     throw new Error("Lavalink is not ready.");
@@ -299,6 +299,24 @@ function buildSpotifySearchQuery(artist: string, query?: string): string {
   return [artist.trim(), query?.trim()].filter(Boolean).join(" ").trim();
 }
 
+function isSpotifyTrackUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+
+  if (trimmed.startsWith("spotify:track:")) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname.includes("spotify.com")) return false;
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    return parts[0] === "track" && Boolean(parts[1]);
+  } catch {
+    return false;
+  }
+}
+
 function readSpotifyAuthConfig():
   | { clientId: string; clientSecret: string; refreshToken: string; market: string; }
   | null {
@@ -317,30 +335,6 @@ function readSpotifyAuthConfig():
   }
 
   return { clientId, clientSecret, refreshToken, market };
-}
-
-async function ensureSpotifyAuthConfigured(): Promise<void> {
-  if (spotifyTokenSetup) {
-    await spotifyTokenSetup;
-    return;
-  }
-
-  const config = readSpotifyAuthConfig();
-  if (!config) {
-    spotifyTokenSetup = Promise.resolve();
-    return;
-  }
-
-  spotifyTokenSetup = playDl.setToken({
-    spotify: {
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      refresh_token: config.refreshToken,
-      market: config.market
-    }
-  });
-
-  await spotifyTokenSetup;
 }
 
 function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
@@ -615,7 +609,6 @@ async function resolveArtistTrack(
   requesterVoice: { id: string; name: string | null; }
 ): Promise<VoiceOperationResult> {
   const searchQuery = buildSpotifySearchQuery(input.artist ?? "", input.query);
-  await ensureSpotifyAuthConfigured();
   const spotifyConfig = readSpotifyAuthConfig();
   if (!spotifyConfig) {
     throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or send a direct link.");
@@ -636,7 +629,7 @@ async function resolveArtistTrack(
   let lastError: unknown = null;
   for (const candidate of rankedCandidates) {
     try {
-      const track = await resolvePlayableTrackForQueue(candidate.url, candidate.name, input.requesterId, input.requesterDisplayName, spotifyConfig);
+      const track = await resolvePlayableTrackForQueue(input.bridgeRequestId, candidate.url, candidate.name, input.requesterId, input.requesterDisplayName, spotifyConfig);
       const result = await queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
         bridgeRequestId: input.bridgeRequestId,
         guildId: input.guildId,
@@ -826,8 +819,10 @@ export function createVoiceManager(
         throw new Error("url is required");
       }
 
-      const spotifyConfig = playDl.sp_validate(input.url) === "track" ? readSpotifyAuthConfig() : null;
+      const spotifyConfig = isSpotifyTrackUrl(input.url) ? readSpotifyAuthConfig() : null;
+
       const track = await resolvePlayableTrackForQueue(
+        input.bridgeRequestId,
         input.url,
         null,
         input.requesterId,
