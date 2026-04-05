@@ -1,5 +1,6 @@
+import { fetchSpotifyTrackMetadata, type SpotifyAuthConfig, type SpotifySearchTrack } from "./spotifySearch";
+
 type PlayDlSpotifyTrackLike = {
-  type: "track" | "playlist" | "album";
   name: string;
   url: string;
   artists?: { name: string }[];
@@ -28,7 +29,6 @@ type PlayDlYouTubeInfoLike = {
 export type PlayDlLike = {
   yt_validate(url: string): "playlist" | "video" | "search" | false;
   sp_validate(url: string): "track" | "playlist" | "album" | "search" | false;
-  spotify(url: string): Promise<PlayDlSpotifyTrackLike>;
   video_info(url: string): Promise<PlayDlYouTubeInfoLike>;
   decipher_info<T extends PlayDlYouTubeInfoLike>(data: T, audioOnly?: boolean): Promise<T>;
   search(query: string, options: {
@@ -69,19 +69,15 @@ function scoreYouTubeVideoResult(track: PlayDlSpotifyTrackLike, result: PlayDlYo
   return score;
 }
 
-function selectBestYouTubeVideoResult(track: PlayDlSpotifyTrackLike, results: PlayDlYouTubeVideoLike[]): PlayDlYouTubeVideoLike | null {
-  let bestResult: PlayDlYouTubeVideoLike | null = null;
-  let bestScore = Number.NEGATIVE_INFINITY;
-
-  for (const result of results) {
-    const score = scoreYouTubeVideoResult(track, result);
-    if (score > bestScore) {
-      bestScore = score;
-      bestResult = result;
-    }
-  }
-
-  return bestResult;
+function rankYouTubeVideoResults(track: PlayDlSpotifyTrackLike, results: PlayDlYouTubeVideoLike[]): PlayDlYouTubeVideoLike[] {
+  return results
+    .filter(result => Boolean(result.url.trim()))
+    .map(result => ({
+      result,
+      score: scoreYouTubeVideoResult(track, result)
+    }))
+    .sort((left, right) => right.score - left.score)
+    .map(entry => entry.result);
 }
 
 function selectBestYouTubeStreamUrl(info: PlayDlYouTubeInfoLike): string | null {
@@ -107,39 +103,70 @@ function selectBestYouTubeStreamUrl(info: PlayDlYouTubeInfoLike): string | null 
 }
 
 async function resolveYouTubeMediaUrl(playDl: PlayDlLike, url: string): Promise<string> {
-  const info = await playDl.decipher_info(await playDl.video_info(url), true);
-  const mediaUrl = selectBestYouTubeStreamUrl(info);
-  if (!mediaUrl) {
-    throw new Error("Couldn't find a playable YouTube stream.");
-  }
+  try {
+    const info = await playDl.decipher_info(await playDl.video_info(url), true);
+    const mediaUrl = selectBestYouTubeStreamUrl(info);
+    if (!mediaUrl) {
+      throw new Error("Couldn't find a playable YouTube stream.");
+    }
 
-  return mediaUrl;
+    return mediaUrl;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to resolve a playable YouTube stream: ${message}`);
+  }
 }
 
-export async function resolveLavalinkTrackIdentifier(playDl: PlayDlLike, url: string): Promise<string> {
-  if (playDl.yt_validate(url) === "video") {
-    return resolveYouTubeMediaUrl(playDl, url);
+async function resolveSpotifyTrackToMediaUrl(
+  playDl: PlayDlLike,
+  url: string,
+  spotifyConfig: SpotifyAuthConfig | null,
+  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack>
+): Promise<string> {
+  if (!spotifyConfig) {
+    throw new Error("Spotify auth is not configured. Set the Spotify auth env vars or send a direct link.");
   }
 
-  if (playDl.sp_validate(url) === "track") {
-    const track = await playDl.spotify(url);
-    if (track.type !== "track") {
-      throw new Error("Only Spotify track URLs are supported.");
+  const track = await spotifyTrackFetcher(url, spotifyConfig);
+  const results = await playDl.search(buildSpotifySearchQuery(track), {
+    source: {
+      youtube: "video"
+    },
+    limit: 10
+  });
+
+  const rankedResults = rankYouTubeVideoResults(track, results);
+  let lastError: unknown = null;
+
+  for (const selected of rankedResults) {
+    try {
+      return await resolveYouTubeMediaUrl(playDl, selected.url);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const lastMessage = lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "";
+  throw new Error(`Couldn't find a playable YouTube version.${lastMessage ? ` ${lastMessage}` : ""}`.trim());
+}
+
+export async function resolveLavalinkTrackIdentifier(
+  playDl: PlayDlLike,
+  url: string,
+  spotifyConfig: SpotifyAuthConfig | null = null,
+  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack> = fetchSpotifyTrackMetadata
+): Promise<string> {
+  try {
+    if (playDl.yt_validate(url) === "video") {
+      return await resolveYouTubeMediaUrl(playDl, url);
     }
 
-    const results = await playDl.search(buildSpotifySearchQuery(track), {
-      source: {
-        youtube: "video"
-      },
-      limit: 10
-    });
-
-    const selected = selectBestYouTubeVideoResult(track, results);
-    if (!selected?.url) {
-      throw new Error("Couldn't find a playable YouTube version.");
+    if (playDl.sp_validate(url) === "track") {
+      return await resolveSpotifyTrackToMediaUrl(playDl, url, spotifyConfig, spotifyTrackFetcher);
     }
-
-    return resolveYouTubeMediaUrl(playDl, selected.url);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message || "Failed to resolve a playable track.");
   }
 
   throw new Error("Only YouTube video URLs or Spotify track URLs are supported.");

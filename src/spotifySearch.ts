@@ -91,6 +91,32 @@ async function getSpotifyAccessToken(config: SpotifyAuthConfig): Promise<{ acces
   return refreshSpotifyAccessToken(config);
 }
 
+function extractSpotifyTrackId(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith("spotify:track:")) {
+    const id = trimmed.slice("spotify:track:".length).split("?")[0]?.trim();
+    return id?.length ? id : null;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname.includes("spotify.com")) {
+      return null;
+    }
+
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "track" || !parts[1]) {
+      return null;
+    }
+
+    return parts[1];
+  } catch {
+    return null;
+  }
+}
+
 export function parseSpotifySearchResponse(bodyText: string, status: number): SpotifySearchTrack[] {
   let payload: {
     error?: { message?: string; status?: number; };
@@ -125,6 +151,56 @@ export function parseSpotifySearchResponse(bodyText: string, status: number): Sp
       artists: (track.artists ?? []).map(artist => ({ name: artist.name ?? "" }))
     }))
     .filter(track => track.name.length > 0 && track.url.length > 0);
+}
+
+export async function fetchSpotifyTrackMetadata(
+  url: string,
+  config: SpotifyAuthConfig
+): Promise<SpotifySearchTrack> {
+  const trackId = extractSpotifyTrackId(url);
+  if (!trackId) {
+    throw new Error("Only Spotify track URLs are supported.");
+  }
+
+  const { accessToken, tokenType } = await getSpotifyAccessToken(config);
+  const trackUrl = new URL(`https://api.spotify.com/v1/tracks/${encodeURIComponent(trackId)}`);
+  trackUrl.searchParams.set("market", config.market);
+
+  const response = await fetch(trackUrl, {
+    headers: {
+      Authorization: `${tokenType} ${accessToken}`,
+      "User-Agent": "PokeDiscord"
+    }
+  });
+
+  const bodyText = await response.text();
+  if (!response.ok) {
+    throw new Error(`Spotify track lookup failed (${response.status}): ${parseSpotifyErrorMessage(bodyText)}`);
+  }
+
+  let payload: {
+    id?: string;
+    name?: string;
+    external_urls?: { spotify?: string; };
+    artists?: Array<{ name?: string; }>;
+  };
+
+  try {
+    payload = JSON.parse(bodyText) as typeof payload;
+  } catch {
+    throw new Error(`Spotify track lookup returned a non-JSON response (${response.status}). Refresh the Spotify auth token and restart, then try again.`);
+  }
+
+  if (!payload.name || !payload.external_urls?.spotify) {
+    throw new Error(`Spotify track lookup returned an unexpected response: ${bodyText.slice(0, 500)}`);
+  }
+
+  return {
+    id: payload.id,
+    name: payload.name,
+    url: payload.external_urls.spotify,
+    artists: (payload.artists ?? []).map(artist => ({ name: artist.name ?? "" })).filter(artist => artist.name.length > 0)
+  };
 }
 
 export async function searchSpotifyTracks(

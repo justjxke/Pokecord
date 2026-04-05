@@ -269,13 +269,14 @@ async function resolvePlayableTrackForQueue(
   sourceUrl: string,
   sourceTitle: string | null,
   requesterId: string,
-  requesterDisplayName: string
+  requesterDisplayName: string,
+  spotifyConfig: ReturnType<typeof readSpotifyAuthConfig> | null = null
 ): Promise<VoiceTrack> {
   if (!lavalinkManager) {
     throw new Error("Lavalink is not ready.");
   }
 
-  const identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl);
+  const identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl, spotifyConfig);
   const node = getIdealNode();
   if (!node) {
     throw new Error("Lavalink is not ready.");
@@ -635,9 +636,8 @@ async function resolveArtistTrack(
   let lastError: unknown = null;
   for (const candidate of rankedCandidates) {
     try {
-      const track = await resolvePlayableTrackForQueue(candidate.url, candidate.name, input.requesterId, input.requesterDisplayName);
-      rememberArtistTrack(input.guildId, input.artist ?? "", candidate.url);
-      return queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
+      const track = await resolvePlayableTrackForQueue(candidate.url, candidate.name, input.requesterId, input.requesterDisplayName, spotifyConfig);
+      const result = await queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
         bridgeRequestId: input.bridgeRequestId,
         guildId: input.guildId,
         requesterId: input.requesterId,
@@ -647,6 +647,8 @@ async function resolveArtistTrack(
         textChannelId: input.textChannelId,
         position: input.position
       }, track);
+      rememberArtistTrack(input.guildId, input.artist ?? "", candidate.url);
+      return result;
     } catch (error) {
       lastError = error;
     }
@@ -824,11 +826,13 @@ export function createVoiceManager(
         throw new Error("url is required");
       }
 
+      const spotifyConfig = playDl.sp_validate(input.url) === "track" ? readSpotifyAuthConfig() : null;
       const track = await resolvePlayableTrackForQueue(
         input.url,
         null,
         input.requesterId,
-        input.requesterDisplayName
+        input.requesterDisplayName,
+        spotifyConfig
       );
 
       return queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
