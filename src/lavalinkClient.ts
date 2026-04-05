@@ -230,12 +230,12 @@ export class LavalinkPlayer extends EventEmitter {
       return;
     }
 
-    void this.syncVoice();
+    this.triggerVoiceSync("setStateUpdate");
   }
 
   public setServerUpdate(update: LavalinkVoiceServerUpdate): void {
     this.voiceServerUpdate = update;
-    void this.syncVoice();
+    this.triggerVoiceSync("setServerUpdate");
   }
 
   public async playTrack(playerOptions: { track: { encoded: string } }, noReplace = false): Promise<void> {
@@ -349,7 +349,7 @@ export class LavalinkPlayer extends EventEmitter {
       }, timeoutMs);
 
       this.voiceReadyWaiters.push(waiter);
-      void this.syncVoice();
+      this.triggerVoiceSync("waitForVoiceReady");
     });
   }
 
@@ -370,6 +370,17 @@ export class LavalinkPlayer extends EventEmitter {
       if (waiter.timeout) clearTimeout(waiter.timeout);
       waiter.reject(error);
     }
+  }
+
+  private triggerVoiceSync(context: string): void {
+    void this.syncVoice().catch(error => {
+      const normalizedError = normalizeError(error);
+      this.emit("error", {
+        guildId: this.guildId,
+        context,
+        error: normalizedError
+      });
+    });
   }
 
   private async syncVoice(): Promise<void> {
@@ -395,7 +406,6 @@ export class LavalinkPlayer extends EventEmitter {
       this.resolveVoiceReady();
     } catch (error) {
       this.rejectVoiceReady(normalizeError(error));
-      throw error;
     }
   }
 }
@@ -431,11 +441,11 @@ export class LavalinkManager extends EventEmitter {
 
     client.on("raw", packet => this.handleRawPacket(packet));
     if (client.user?.id) {
-      void this.connect(client.user.id);
+      void this.connect(client.user.id).catch(error => this.error(error));
     } else {
       client.once("clientReady", () => {
         if (client.user?.id) {
-          void this.connect(client.user.id);
+          void this.connect(client.user.id).catch(error => this.error(error));
         }
       });
     }
@@ -463,7 +473,7 @@ export class LavalinkManager extends EventEmitter {
       this.connectReject = reject;
     });
 
-    void this.openWebSocket();
+    void this.openWebSocket().catch(error => this.error(error));
     return this.connectPromise;
   }
 
@@ -528,7 +538,7 @@ export class LavalinkManager extends EventEmitter {
 
     socket.addEventListener("message", event => {
       const data = "data" in event ? (event as MessageEvent).data : event;
-      void this.handleMessage(data);
+      void this.handleMessage(data).catch(error => this.error(error));
     });
 
     socket.addEventListener("error", event => {
@@ -539,7 +549,7 @@ export class LavalinkManager extends EventEmitter {
     });
 
     socket.addEventListener("close", event => {
-      void this.handleClose(event);
+      void this.handleClose(event).catch(error => this.error(error));
     });
   }
 
