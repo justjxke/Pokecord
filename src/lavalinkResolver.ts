@@ -130,52 +130,76 @@ async function resolveYouTubeMediaUrl(playDl: PlayDlLike, url: string): Promise<
   }
 }
 
-async function resolveSpotifyTrackToMediaUrl(
+async function resolveSpotifyTrackToRankedYouTubeResults(
   playDl: PlayDlLike,
   url: string,
   spotifyConfig: SpotifyAuthConfig | null,
-  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack>
-): Promise<string> {
+  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack>,
+  bridgeRequestId?: string
+): Promise<PlayDlYouTubeVideoLike[]> {
   if (!spotifyConfig) {
     throw new Error("Spotify auth is not configured. Set the Spotify auth env vars or send a direct link.");
   }
 
   const track = await spotifyTrackFetcher(url, spotifyConfig);
-  const results = await playDl.search(buildSpotifySearchQuery(track), {
-    source: {
-      youtube: "video"
-    },
-    limit: 10
-  });
-
-  const rankedResults = rankYouTubeVideoResults(track, results);
-  let lastError: unknown = null;
-
-  for (const selected of rankedResults) {
-    try {
-      return await resolveYouTubeMediaUrl(playDl, selected.url);
-    } catch (error) {
-      lastError = error;
-    }
+  let results: PlayDlYouTubeVideoLike[] = [];
+  try {
+    results = await playDl.search(buildSpotifySearchQuery(track), {
+      source: {
+        youtube: "video"
+      },
+      limit: 10
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`YouTube search failed while resolving Spotify track${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
   }
 
-  const lastMessage = lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "";
-  throw new Error(`Couldn't find a playable YouTube version.${lastMessage ? ` ${lastMessage}` : ""}`.trim());
+  return rankYouTubeVideoResults(track, results);
 }
 
 export async function resolveLavalinkTrackIdentifier(
   playDl: PlayDlLike,
   url: string,
   spotifyConfig: SpotifyAuthConfig | null = null,
-  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack> = fetchSpotifyTrackMetadata
+  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack> = fetchSpotifyTrackMetadata,
+  bridgeRequestId?: string
 ): Promise<string> {
   try {
-    if (playDl.yt_validate(url) === "video") {
+    let youtubeValidation: ReturnType<PlayDlLike["yt_validate"]>;
+    try {
+      youtubeValidation = playDl.yt_validate(url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Couldn't validate the YouTube URL${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
+    }
+
+    if (youtubeValidation === "video") {
       return await resolveYouTubeMediaUrl(playDl, url);
     }
 
-    if (playDl.sp_validate(url) === "track") {
-      return await resolveSpotifyTrackToMediaUrl(playDl, url, spotifyConfig, spotifyTrackFetcher);
+    let spotifyValidation: ReturnType<PlayDlLike["sp_validate"]>;
+    try {
+      spotifyValidation = playDl.sp_validate(url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Couldn't validate the Spotify URL${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
+    }
+
+    if (spotifyValidation === "track") {
+      const rankedResults = await resolveSpotifyTrackToRankedYouTubeResults(playDl, url, spotifyConfig, spotifyTrackFetcher, bridgeRequestId);
+      let lastError: unknown = null;
+
+      for (const selected of rankedResults) {
+        try {
+          return await resolveYouTubeMediaUrl(playDl, selected.url);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      const lastMessage = lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "";
+      throw new Error(`Couldn't find a playable YouTube version.${lastMessage ? ` ${lastMessage}` : ""}`.trim());
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
