@@ -1,241 +1,51 @@
 import { fetchSpotifyTrackMetadata, type SpotifyAuthConfig, type SpotifySearchTrack } from "./spotifySearch";
 
-type PlayDlSpotifyTrackLike = {
-  name: string;
-  url: string;
-  artists?: { name: string }[];
-};
-
-type PlayDlYouTubeVideoLike = {
-  url: string;
-  title?: string;
-  channel?: {
-    name?: string;
-  };
-};
-
-type PlayDlYouTubeInfoLike = {
-  format: Array<{
-    url?: string;
-    bitrate?: number;
-    mimeType?: string;
-    audioQuality?: string;
-    audioChannels?: number;
-    qualityLabel?: string;
-    itag?: number;
-  }>;
-};
-
-export type PlayDlLike = {
-  yt_validate(url: string): "playlist" | "video" | "search" | false;
-  sp_validate(url: string): "track" | "playlist" | "album" | "search" | false;
-  video_info(url: string): Promise<PlayDlYouTubeInfoLike>;
-  decipher_info<T extends PlayDlYouTubeInfoLike>(data: T, audioOnly?: boolean): Promise<T>;
-  search(query: string, options: {
-    source: {
-      youtube: "video";
-    };
-    limit?: number;
-  }): Promise<PlayDlYouTubeVideoLike[]>;
-};
-
-const YOUTUBE_MEDIA_URL_CACHE_TTL_MS = 30 * 60 * 1000;
-const youtubeMediaUrlCache = new Map<string, { mediaUrl: string; expiresAt: number }>();
-
-function buildSpotifySearchQuery(track: PlayDlSpotifyTrackLike): string {
-  const artists = track.artists?.map(artist => artist.name.trim()).filter(Boolean).join(" ") ?? "";
-  return [track.name.trim(), artists].filter(Boolean).join(" ").trim();
+function normalizeSearchPart(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
 }
 
-function normalizeSearchKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function scoreYouTubeVideoResult(track: PlayDlSpotifyTrackLike, result: PlayDlYouTubeVideoLike): number {
-  const title = normalizeSearchKey(result.title ?? "");
-  const channel = normalizeSearchKey(result.channel?.name ?? "");
-  const trackName = normalizeSearchKey(track.name);
-  const artists = track.artists?.map(artist => normalizeSearchKey(artist.name)).filter(Boolean) ?? [];
-
-  if (!result.url.trim() || !title) return Number.NEGATIVE_INFINITY;
-
-  let score = 0;
-
-  if (title.includes(trackName)) score += 4;
-  if (trackName.includes(title)) score += 1;
-
-  for (const artist of artists) {
-    if (title.includes(artist)) score += 2;
-    if (channel.includes(artist)) score += 1;
-  }
-
-  return score;
-}
-
-function rankYouTubeVideoResults(track: PlayDlSpotifyTrackLike, results: PlayDlYouTubeVideoLike[]): PlayDlYouTubeVideoLike[] {
-  return results
-    .filter(result => Boolean(result.url.trim()))
-    .map(result => ({
-      result,
-      score: scoreYouTubeVideoResult(track, result)
-    }))
-    .sort((left, right) => right.score - left.score)
-    .map(entry => entry.result);
-}
-
-function selectBestYouTubeStreamUrl(info: PlayDlYouTubeInfoLike): string | null {
-  let bestUrl: string | null = null;
-  let bestScore = Number.NEGATIVE_INFINITY;
-
-  for (const format of info.format) {
-    if (!format.url) continue;
-
-    let score = 0;
-    if (format.mimeType?.includes("audio")) score += 3;
-    if (typeof format.audioChannels === "number") score += 2;
-    if (typeof format.bitrate === "number") score += Math.min(5, Math.floor(format.bitrate / 50_000));
-    if (format.qualityLabel) score += 1;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestUrl = format.url;
-    }
-  }
-
-  return bestUrl;
-}
-
-function canonicalizeYouTubeWatchUrl(url: string): string {
-  const trimmed = url.trim();
-  if (!trimmed) return "";
-
+function isYouTubeVideoUrl(url: string): boolean {
   try {
-    const parsed = new URL(trimmed);
-    const hostname = parsed.hostname.toLowerCase();
-    const isYouTubeHost = hostname === "youtu.be" || hostname === "youtube.com" || hostname.endsWith(".youtube.com");
-    if (!isYouTubeHost) return trimmed;
-
-    let videoId = "";
-
-    if (hostname === "youtu.be") {
-      videoId = parsed.pathname.split("/").filter(Boolean)[0] ?? "";
-    } else {
-      if (parsed.pathname === "/watch") {
-        videoId = parsed.searchParams.get("v")?.trim() ?? "";
-      } else {
-        const parts = parsed.pathname.split("/").filter(Boolean);
-        if (parts[0] === "shorts" || parts[0] === "live" || parts[0] === "embed") {
-          videoId = parts[1]?.trim() ?? "";
-        }
-      }
+    const parsed = new URL(url);
+    if (parsed.hostname === "youtu.be") {
+      return parsed.pathname.split("/").filter(Boolean).length > 0;
     }
 
-    if (!videoId) return trimmed;
-    return `https://www.youtube.com/watch?v=${videoId}`;
+    if (!parsed.hostname.includes("youtube.com")) {
+      return false;
+    }
+
+    return parsed.pathname === "/watch" && parsed.searchParams.has("v");
   } catch {
-    return trimmed;
+    return false;
   }
 }
 
-async function cacheYouTubeMediaUrlForDiagnostics(playDl: PlayDlLike, url: string): Promise<void> {
-  const canonicalUrl = canonicalizeYouTubeWatchUrl(url);
-  if (!canonicalUrl) return;
-
-  const cached = youtubeMediaUrlCache.get(canonicalUrl);
-  if (cached && cached.expiresAt > Date.now()) return;
-
-  try {
-    const info = await playDl.decipher_info(await playDl.video_info(canonicalUrl), true);
-    const mediaUrl = selectBestYouTubeStreamUrl(info);
-    if (!mediaUrl) return;
-
-    youtubeMediaUrlCache.set(canonicalUrl, {
-      mediaUrl,
-      expiresAt: Date.now() + YOUTUBE_MEDIA_URL_CACHE_TTL_MS
-    });
-  } catch {
-    // Diagnostic cache is best-effort only.
-  }
-}
-
-async function resolveSpotifyTrackToRankedYouTubeResults(
-  playDl: PlayDlLike,
-  url: string,
-  spotifyConfig: SpotifyAuthConfig | null,
-  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack>,
-  bridgeRequestId?: string
-): Promise<PlayDlYouTubeVideoLike[]> {
-  if (!spotifyConfig) {
-    throw new Error("Spotify auth is not configured. Set the Spotify auth env vars or send a direct link.");
-  }
-
-  let track: SpotifySearchTrack;
-  try {
-    track = await spotifyTrackFetcher(url, spotifyConfig);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Spotify metadata fetch failed${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
-  }
-
-  let results: PlayDlYouTubeVideoLike[] = [];
-  try {
-    results = await playDl.search(buildSpotifySearchQuery(track), {
-      source: {
-        youtube: "video"
-      },
-      limit: 10
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`YouTube candidate search failed${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
-  }
-
-  return rankYouTubeVideoResults(track, results);
+export function buildSpotifyTrackSearchIdentifier(track: SpotifySearchTrack): string {
+  const artists = (track.artists ?? [])
+    .map(artist => normalizeSearchPart(artist.name))
+    .filter(Boolean)
+    .join(" ");
+  const name = normalizeSearchPart(track.name);
+  return `ytsearch:${[artists, name].filter(Boolean).join(" ").trim()}`;
 }
 
 export async function resolveLavalinkTrackIdentifier(
-  playDl: PlayDlLike,
   url: string,
   spotifyConfig: SpotifyAuthConfig | null = null,
-  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack> = fetchSpotifyTrackMetadata,
-  bridgeRequestId?: string
+  spotifyTrackFetcher: (url: string, config: SpotifyAuthConfig) => Promise<SpotifySearchTrack> = fetchSpotifyTrackMetadata
 ): Promise<string> {
-  try {
-    let youtubeValidation: ReturnType<PlayDlLike["yt_validate"]>;
-    try {
-      youtubeValidation = playDl.yt_validate(url);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Couldn't validate the YouTube URL${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
+  if (isYouTubeVideoUrl(url)) {
+    return url.trim();
+  }
+
+  if (url.includes("spotify.com/track/") || url.startsWith("spotify:track:")) {
+    if (!spotifyConfig) {
+      throw new Error("Spotify auth is not configured. Set the Spotify auth env vars or send a direct YouTube link.");
     }
 
-    if (youtubeValidation === "video") {
-      const canonicalUrl = canonicalizeYouTubeWatchUrl(url);
-      void cacheYouTubeMediaUrlForDiagnostics(playDl, canonicalUrl);
-      return canonicalUrl || url.trim();
-    }
-
-    let spotifyValidation: ReturnType<PlayDlLike["sp_validate"]>;
-    try {
-      spotifyValidation = playDl.sp_validate(url);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Couldn't validate the Spotify URL${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
-    }
-
-    if (spotifyValidation === "track") {
-      const rankedResults = await resolveSpotifyTrackToRankedYouTubeResults(playDl, url, spotifyConfig, spotifyTrackFetcher, bridgeRequestId);
-      const selected = rankedResults[0];
-      if (!selected?.url?.trim()) {
-        throw new Error("YouTube candidate search failed to return a usable match.");
-      }
-      const canonicalUrl = canonicalizeYouTubeWatchUrl(selected.url);
-      void cacheYouTubeMediaUrlForDiagnostics(playDl, canonicalUrl);
-      return canonicalUrl || selected.url.trim();
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message || "Failed to resolve a playable track.");
+    const track = await spotifyTrackFetcher(url, spotifyConfig);
+    return buildSpotifyTrackSearchIdentifier(track);
   }
 
   throw new Error("Only YouTube video URLs or Spotify track URLs are supported.");

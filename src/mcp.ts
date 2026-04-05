@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import type { BridgeState, DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
+import type { DiscordChannelHistoryMessage, DiscordOutboundAttachment, DiscordOutboundEmbed } from "./types";
 import type { VoiceOperationResult } from "./voice";
 
 type VoiceControlAction = "join" | "pause" | "resume" | "skip" | "stop" | "leave" | "current" | "queue" | "remove" | "clear";
@@ -11,7 +11,7 @@ type ControlVoicePlaybackRequest = { bridgeRequestId: string; action: VoiceContr
 interface StartMcpServerOptions {
   host: string;
   port: number;
-  state: BridgeState;
+  getHealthStatus: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   onSendDiscordMessage: (content: string, meta?: { channelId?: string; bridgeRequestId?: string; replyToMessageId?: string; attachments?: DiscordOutboundAttachment[]; embeds?: DiscordOutboundEmbed[]; }) => Promise<string[]>;
   onEditDiscordMessage: (meta: { content?: string; embeds?: DiscordOutboundEmbed[]; channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
   onDeleteDiscordMessage: (meta: { channelId?: string; bridgeRequestId?: string; messageId?: string; }) => Promise<void>;
@@ -56,6 +56,10 @@ const CONTROL_VOICE_TOOL_NAME = "controlVoicePlayback";
 const CONTROL_VOICE_TOOL_DESCRIPTION = "Control the current guild voice session.";
 const MAX_BODY_BYTES = 128_000;
 const CORS_HEADERS = "Content-Type, Mcp-Session-Id";
+
+function log(message: string): void {
+  process.stdout.write(`[poke-discord-bridge:mcp] ${message}\n`);
+}
 
 function writeJson(res: ServerResponse, statusCode: number, value: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(statusCode, {
@@ -828,6 +832,9 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
     }
 
     try {
+      const startedAt = Date.now();
+      const bridgeRequestId = readString(args.bridgeRequestId);
+      log(`tools/call start name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""}`);
       const result = name === SEND_TOOL_NAME
         ? await handleSendToolCall(args, options.onSendDiscordMessage)
         : name === REPLY_TOOL_NAME
@@ -843,6 +850,7 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
                   : name === QUEUE_VOICE_TOOL_NAME
                     ? await handleQueueVoiceTrackToolCall(args, options.onQueueVoiceTrack)
                     : await handleControlVoicePlaybackToolCall(args, options.onControlVoicePlayback);
+      log(`tools/call ok name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""} durationMs=${Date.now() - startedAt}`);
       return {
         jsonrpc: "2.0",
         id: request.id ?? null,
@@ -852,6 +860,8 @@ async function handleRequest(request: JsonRpcRequest, options: StartMcpServerOpt
         }
       };
     } catch (error) {
+      const bridgeRequestId = readString(args.bridgeRequestId);
+      log(`tools/call error name=${name}${bridgeRequestId ? ` bridgeRequestId=${bridgeRequestId}` : ""} message=${error instanceof Error ? error.message : String(error)}`);
       return {
         jsonrpc: "2.0",
         id: request.id ?? null,
@@ -896,16 +906,7 @@ export async function startMcpServer(options: StartMcpServerOptions): Promise<{ 
     }
 
     if (req.method === "GET" && matchesRoute(path, "/health")) {
-      const installationCount = Object.keys(options.state.guildInstallations).length;
-      const linkedUsers = Object.values(options.state.users).filter(user => user.encryptedPokeApiKey != null).length;
-      writeJson(res, 200, {
-        ok: true,
-        mode: options.state.mode,
-        ownerLinked: options.state.owner.encryptedPokeApiKey != null,
-        linkedUsers,
-        installedGuilds: installationCount,
-        linkedTenants: (options.state.owner.encryptedPokeApiKey ? 1 : 0) + linkedUsers + installationCount
-      });
+      writeJson(res, 200, await options.getHealthStatus());
       return;
     }
 

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { BridgeConfig } from "./types";
 
@@ -37,6 +37,8 @@ export function loadConfig(): BridgeConfig {
   const discordToken = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN ?? "";
   const statePath = process.env.POKE_DISCORD_BRIDGE_STATE_PATH
     ?? join(process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? ".", ".config"), "poke-discord-bridge", "state.json");
+  const runtimeDbPath = process.env.POKE_DISCORD_BRIDGE_RUNTIME_DB_PATH
+    ?? join(dirname(statePath), "runtime.sqlite");
   const stateSecret = process.env.POKE_STATE_SECRET?.trim() || "";
   const ownerDiscordUserId = process.env.POKE_OWNER_DISCORD_USER_ID?.trim() || null;
   const lavalinkUrl = process.env.POKE_LAVALINK_URL?.trim() || "";
@@ -55,6 +57,7 @@ export function loadConfig(): BridgeConfig {
     mcpHost: process.env.POKE_MCP_HOST ?? DEFAULT_MCP_HOST,
     mcpPort: readNumber(process.env.POKE_MCP_PORT, DEFAULT_MCP_PORT),
     statePath,
+    runtimeDbPath,
     contextMessageCount: readNumber(process.env.POKE_CONTEXT_MESSAGES, DEFAULT_CONTEXT_MESSAGE_COUNT),
     stateSecret,
     ownerDiscordUserId,

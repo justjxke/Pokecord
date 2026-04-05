@@ -38,6 +38,7 @@ export interface BridgeConfig {
   mcpHost: string;
   mcpPort: number;
   statePath: string;
+  runtimeDbPath: string;
   contextMessageCount: number;
   stateSecret: string;
   ownerDiscordUserId: string | null;

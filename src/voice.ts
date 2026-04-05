@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import type { Client, Guild } from "discord.js";
-import * as playDl from "play-dl";
 
 import { LavalinkManager, type LavalinkPlayer, type LavalinkSearchResponse, type LavalinkTrack } from "./lavalinkClient";
 import { searchSpotifyTracks } from "./spotifySearch";
@@ -13,13 +12,14 @@ import type {
   DiscordVoiceTrackSummary,
   DiscordVoiceUserSnapshot
 } from "./types";
-import { resolveLavalinkTrackIdentifier, type PlayDlLike } from "./lavalinkResolver";
+import { buildSpotifyTrackSearchIdentifier, resolveLavalinkTrackIdentifier } from "./lavalinkResolver";
 import { normalizeMusicKey, rankArtistBoundTracks, type MusicSelectionCandidate } from "./musicSelection";
 
 const IDLE_LEAVE_DELAY_MS = 5 * 60 * 1000;
 const LAVALINK_DEFAULT_VOICE_TIMEOUT_SECONDS = 15;
 const LAVALINK_DEFAULT_REST_TIMEOUT_SECONDS = 60;
 
+let spotifyTokenSetup: Promise<void> | null = null;
 let lavalinkManager: LavalinkManager | null = null;
 
 interface VoiceTrack extends DiscordVoiceTrackSummary {
@@ -38,7 +38,6 @@ interface VoiceSession {
   idleLeaveTimer: NodeJS.Timeout | null;
   player: LavalinkPlayer;
   destroyed: boolean;
-  operationVersion: number;
 }
 
 export interface QueueVoiceTrackInput {
@@ -184,48 +183,33 @@ function clearIdleTimer(session: VoiceSession): void {
   }
 }
 
-function startSessionOperation(session: VoiceSession): number {
-  session.operationVersion += 1;
-  return session.operationVersion;
-}
-
-function canApplyOperation(session: VoiceSession, operationVersion: number): boolean {
-  return !session.destroyed && session.operationVersion === operationVersion;
-}
-
 function scheduleIdleLeave(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
-  announce: (channelId: string, content: string) => Promise<void>,
-  operationVersion: number = session.operationVersion
+  announce: (channelId: string, content: string) => Promise<void>
 ): void {
-  if (!canApplyOperation(session, operationVersion) || session.idleLeaveAt != null) return;
+  if (session.destroyed || session.idleLeaveAt != null) return;
 
   session.idleLeaveAt = Date.now() + IDLE_LEAVE_DELAY_MS;
   const leaveAt = session.idleLeaveAt;
 
   if (session.textChannelId) {
-    const announcementChannelId = session.textChannelId;
-    void announce(announcementChannelId, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.")
-      .catch(error => {
-        console.error(`[poke-discord-bridge] Failed idle-leave announcement in guild ${session.guildId}:`, error);
-      });
+    void (async () => {
+      try {
+        await announce(session.textChannelId as string, "Queue ended. I'll hang out for 5 minutes, then leave if nothing else starts.");
+      } catch {
+        // Best effort only.
+      }
+    })();
   }
 
   session.idleLeaveTimer = setTimeout(() => {
     void (async () => {
-      try {
-        const current = sessions.get(session.guildId);
-        if (!current || current.destroyed || current.idleLeaveAt !== leaveAt || current.queue.length || current.currentTrack) {
-          return;
-        }
-        if (current.operationVersion !== operationVersion) {
-          return;
-        }
-        await destroySession(sessions, session.guildId, operationVersion);
-      } catch (error) {
-        console.error(`[poke-discord-bridge] Failed idle-leave timeout in guild ${session.guildId}:`, error);
+      const current = sessions.get(session.guildId);
+      if (!current || current.destroyed || current.idleLeaveAt !== leaveAt || current.queue.length || current.currentTrack) {
+        return;
       }
+      await destroySession(sessions, session.guildId);
     })();
   }, IDLE_LEAVE_DELAY_MS);
 }
@@ -281,23 +265,13 @@ function buildTrackFromResolvedLavalinkTrack(
 }
 
 async function resolvePlayableTrackForQueue(
-  bridgeRequestId: string,
-  sourceUrl: string,
+  identifier: string,
   sourceTitle: string | null,
   requesterId: string,
-  requesterDisplayName: string,
-  spotifyConfig: ReturnType<typeof readSpotifyAuthConfig> | null = null
+  requesterDisplayName: string
 ): Promise<VoiceTrack> {
   if (!lavalinkManager) {
     throw new Error("Lavalink is not ready.");
-  }
-
-  let identifier: string;
-  try {
-    identifier = await resolveLavalinkTrackIdentifier(playDl as PlayDlLike, sourceUrl, spotifyConfig, undefined, bridgeRequestId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message || "Failed to resolve a playable track identifier.");
   }
 
   const node = getIdealNode();
@@ -305,46 +279,21 @@ async function resolvePlayableTrackForQueue(
     throw new Error("Lavalink is not ready.");
   }
 
-  let result: LavalinkSearchResponse | null;
-  try {
-    result = await node.rest.resolve(identifier);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Lavalink loadtracks failure${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: ${message}`);
-  }
-
+  const result = await node.rest.resolve(identifier);
   if (!result) {
-    throw new Error(`Lavalink loadtracks failure${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: empty response from node.`);
+    throw new Error("Lavalink is not ready.");
   }
 
   const track = selectLoadResultTrack(result);
   if (!track) {
-    throw new Error(`Lavalink loadtracks failure${bridgeRequestId ? ` (${bridgeRequestId})` : ""}: no playable track found.`);
+    throw new Error("Couldn't find a playable version. Send a direct link.");
   }
 
-  return buildTrackFromResolvedLavalinkTrack(track, sourceTitle ?? sourceUrl, requesterId, requesterDisplayName);
+  return buildTrackFromResolvedLavalinkTrack(track, sourceTitle ?? identifier, requesterId, requesterDisplayName);
 }
 
 function buildSpotifySearchQuery(artist: string, query?: string): string {
   return [artist.trim(), query?.trim()].filter(Boolean).join(" ").trim();
-}
-
-function isSpotifyTrackUrl(url: string): boolean {
-  const trimmed = url.trim();
-  if (!trimmed) return false;
-
-  if (trimmed.startsWith("spotify:track:")) {
-    return true;
-  }
-
-  try {
-    const parsed = new URL(trimmed);
-    if (!parsed.hostname.includes("spotify.com")) return false;
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    return parts[0] === "track" && Boolean(parts[1]);
-  } catch {
-    return false;
-  }
 }
 
 function readSpotifyAuthConfig():
@@ -365,6 +314,22 @@ function readSpotifyAuthConfig():
   }
 
   return { clientId, clientSecret, refreshToken, market };
+}
+
+async function ensureSpotifyAuthConfigured(): Promise<void> {
+  if (spotifyTokenSetup) {
+    await spotifyTokenSetup;
+    return;
+  }
+
+  const config = readSpotifyAuthConfig();
+  if (!config) {
+    spotifyTokenSetup = Promise.resolve();
+    return;
+  }
+
+  spotifyTokenSetup = Promise.resolve();
+  await spotifyTokenSetup;
 }
 
 function toMusicSelectionCandidate(track: PlayDlSpotifySearchResultLike): MusicSelectionCandidate {
@@ -407,60 +372,38 @@ async function createSession(
     idleLeaveAt: null,
     idleLeaveTimer: null,
     player,
-    destroyed: false,
-    operationVersion: 0
+    destroyed: false
   };
 
   sessions.set(guildId, session);
 
   player.on("end", event => {
-    const operationVersion = startSessionOperation(session);
-    void handleTrackCompletion(sessions, session, announce, event.reason, operationVersion)
-      .catch(error => {
-        console.error(`[poke-discord-bridge] Failed end handler in guild ${guildId}:`, error);
-      });
+    void handleTrackCompletion(sessions, session, announce, event.reason);
   });
 
   player.on("stuck", event => {
     console.error(`[poke-discord-bridge] Voice track stuck in guild ${guildId}:`, event);
-    const operationVersion = startSessionOperation(session);
-    void handleTrackFailure(sessions, session, announce, "A track got stuck. Skipping to the next one.", operationVersion)
-      .catch(error => {
-        console.error(`[poke-discord-bridge] Failed stuck handler in guild ${guildId}:`, error);
-      });
+    void handleTrackFailure(sessions, session, announce, "A track got stuck. Skipping to the next one.");
   });
 
   player.on("exception", event => {
     console.error(`[poke-discord-bridge] Voice track exception in guild ${guildId}:`, event);
-    const operationVersion = startSessionOperation(session);
-    void handleTrackFailure(sessions, session, announce, "A track failed to play. Skipping to the next one.", operationVersion)
-      .catch(error => {
-        console.error(`[poke-discord-bridge] Failed exception handler in guild ${guildId}:`, error);
-      });
+    void handleTrackFailure(sessions, session, announce, "A track failed to play. Skipping to the next one.");
   });
 
   player.on("closed", event => {
     console.error(`[poke-discord-bridge] Voice player closed in guild ${guildId}:`, event);
-    const operationVersion = startSessionOperation(session);
-    void destroySession(sessions, guildId, operationVersion).catch(error => {
-      console.error(`[poke-discord-bridge] Failed closed handler in guild ${guildId}:`, error);
-    });
+    void destroySession(sessions, guildId);
   });
 
   return session;
 }
 
-async function destroySession(
-  sessions: Map<string, VoiceSession>,
-  guildId: string,
-  operationVersion?: number
-): Promise<void> {
+async function destroySession(sessions: Map<string, VoiceSession>, guildId: string): Promise<void> {
   const session = sessions.get(guildId);
   if (!session || session.destroyed) return;
-  if (operationVersion != null && !canApplyOperation(session, operationVersion)) return;
 
   session.destroyed = true;
-  session.operationVersion += 1;
   clearIdleTimer(session);
   session.queue = [];
   session.currentTrack = null;
@@ -478,17 +421,16 @@ async function handleTrackCompletion(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
-  reason: string,
-  operationVersion: number
+  reason: string
 ): Promise<void> {
-  if (!canApplyOperation(session, operationVersion)) return;
+  if (session.destroyed) return;
 
   const finishedTrack = session.currentTrack;
   session.currentTrack = null;
 
   if (finishedTrack == null) {
     if (!session.queue.length) {
-      scheduleIdleLeave(sessions, session, announce, operationVersion);
+      scheduleIdleLeave(sessions, session, announce);
     }
     return;
   }
@@ -498,7 +440,7 @@ async function handleTrackCompletion(
       await advanceQueue(sessions, session, announce);
       return;
     }
-    scheduleIdleLeave(sessions, session, announce, operationVersion);
+    scheduleIdleLeave(sessions, session, announce);
     return;
   }
 
@@ -507,27 +449,26 @@ async function handleTrackCompletion(
     return;
   }
 
-  scheduleIdleLeave(sessions, session, announce, operationVersion);
+  scheduleIdleLeave(sessions, session, announce);
 }
 
 async function handleTrackFailure(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
   announce: (channelId: string, content: string) => Promise<void>,
-  message: string,
-  operationVersion: number
+  message: string
 ): Promise<void> {
-  if (!canApplyOperation(session, operationVersion)) return;
+  if (session.destroyed) return;
 
   const failedTrack = session.currentTrack;
   session.currentTrack = null;
 
   if (failedTrack && session.textChannelId) {
-    const channelId = session.textChannelId;
-    if (!canApplyOperation(session, operationVersion)) return;
-    await announce(channelId, `${message} ${failedTrack.title}`).catch(error => {
-      console.error(`[poke-discord-bridge] Failed failure announcement in guild ${session.guildId}:`, error);
-    });
+    try {
+      await announce(session.textChannelId, `${message} ${failedTrack.title}`);
+    } catch {
+      // Best effort only.
+    }
   }
 
   if (session.queue.length) {
@@ -535,53 +476,45 @@ async function handleTrackFailure(
     return;
   }
 
-  scheduleIdleLeave(sessions, session, announce, operationVersion);
+  scheduleIdleLeave(sessions, session, announce);
 }
 
 async function advanceQueue(
   sessions: Map<string, VoiceSession>,
   session: VoiceSession,
-  announce: (channelId: string, content: string) => Promise<void>,
-  operationVersion: number = startSessionOperation(session)
+  announce: (channelId: string, content: string) => Promise<void>
 ): Promise<void> {
-  if (!canApplyOperation(session, operationVersion) || session.currentTrack) return;
+  if (session.destroyed || session.currentTrack) return;
 
-  if (!canApplyOperation(session, operationVersion)) return;
   const nextTrack = session.queue.shift() ?? null;
   if (!nextTrack) {
-    scheduleIdleLeave(sessions, session, announce, operationVersion);
+    scheduleIdleLeave(sessions, session, announce);
     return;
   }
 
-  if (!canApplyOperation(session, operationVersion)) return;
   clearIdleTimer(session);
-  if (!canApplyOperation(session, operationVersion)) return;
   session.currentTrack = nextTrack;
 
   try {
-    if (!canApplyOperation(session, operationVersion)) return;
     await session.player.playTrack({ track: { encoded: nextTrack.encoded } });
   } catch (error) {
-    if (!canApplyOperation(session, operationVersion)) return;
     console.error(`[poke-discord-bridge] Failed to play track in guild ${session.guildId}:`, error);
     session.currentTrack = null;
-    const detail = error instanceof Error ? error.message : String(error);
 
     if (session.textChannelId) {
-      const channelId = session.textChannelId;
-      if (!canApplyOperation(session, operationVersion)) return;
-      await announce(channelId, `I couldn't play ${nextTrack.title}. Skipping it.`).catch(announceError => {
-        console.error(`[poke-discord-bridge] Failed playback error announcement in guild ${session.guildId}:`, announceError);
-      });
+      try {
+        await announce(session.textChannelId, `I couldn't play ${nextTrack.title}. Skipping it.`);
+      } catch {
+        // Best effort only.
+      }
     }
 
-    if (!canApplyOperation(session, operationVersion)) return;
     if (session.queue.length) {
       await advanceQueue(sessions, session, announce);
       return;
     }
 
-    scheduleIdleLeave(sessions, session, announce, operationVersion);
+    scheduleIdleLeave(sessions, session, announce);
   }
 }
 
@@ -606,16 +539,9 @@ async function queueResolvedTrack(
     throw new Error(`Poke is already in <#${session.voiceChannelId}>. Join that channel to queue music.`);
   }
 
-  if (session.destroyed) {
-    throw new Error("Voice session is closing. Try again.");
-  }
-
   session.textChannelId = input.textChannelId;
   clearIdleTimer(session);
 
-  if (session.destroyed) {
-    throw new Error("Voice session is closing. Try again.");
-  }
   if (input.position === "front") {
     session.queue.unshift(track);
   } else {
@@ -678,6 +604,7 @@ async function resolveArtistTrack(
   requesterVoice: { id: string; name: string | null; }
 ): Promise<VoiceOperationResult> {
   const searchQuery = buildSpotifySearchQuery(input.artist ?? "", input.query);
+  await ensureSpotifyAuthConfigured();
   const spotifyConfig = readSpotifyAuthConfig();
   if (!spotifyConfig) {
     throw new Error("Spotify search is not configured on this VPS. Set the Spotify auth env vars or send a direct link.");
@@ -698,7 +625,13 @@ async function resolveArtistTrack(
   let lastError: unknown = null;
   for (const candidate of rankedCandidates) {
     try {
-      const track = await resolvePlayableTrackForQueue(input.bridgeRequestId, candidate.url, candidate.name, input.requesterId, input.requesterDisplayName, spotifyConfig);
+      const identifier = buildSpotifyTrackSearchIdentifier({
+        id: candidate.id,
+        name: candidate.name,
+        url: candidate.url,
+        artists: candidate.artists.map(name => ({ name }))
+      });
+      const track = await resolvePlayableTrackForQueue(identifier, candidate.name, input.requesterId, input.requesterDisplayName);
       const result = await queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
         bridgeRequestId: input.bridgeRequestId,
         guildId: input.guildId,
@@ -888,16 +821,11 @@ export function createVoiceManager(
         throw new Error("url is required");
       }
 
-      const spotifyConfig = isSpotifyTrackUrl(input.url) ? readSpotifyAuthConfig() : null;
-
-      const track = await resolvePlayableTrackForQueue(
-        input.bridgeRequestId,
-        input.url,
-        null,
-        input.requesterId,
-        input.requesterDisplayName,
-        spotifyConfig
-      );
+      const spotifyConfig = input.url.includes("spotify.com/track/") || input.url.startsWith("spotify:track:")
+        ? readSpotifyAuthConfig()
+        : null;
+      const identifier = await resolveLavalinkTrackIdentifier(input.url, spotifyConfig);
+      const track = await resolvePlayableTrackForQueue(identifier, null, input.requesterId, input.requesterDisplayName);
 
       return queueResolvedTrack(client, config, sessions, announce, "queueVoiceTrack", {
         bridgeRequestId: input.bridgeRequestId,
